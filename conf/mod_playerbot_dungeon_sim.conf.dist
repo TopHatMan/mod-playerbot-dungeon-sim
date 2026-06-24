@@ -9,8 +9,6 @@ PlayerbotDungeonSim.AllowPugs = 1
 PlayerbotDungeonSim.RequireFullGroup = 1
 PlayerbotDungeonSim.RealRunFirst = 1
 PlayerbotDungeonSim.SimFallback = 1
-PlayerbotDungeonSim.InviteRealPlayers = 0
-PlayerbotDungeonSim.InviteTimeoutSeconds = 60
 PlayerbotDungeonSim.MinDurationMinutes = 20
 PlayerbotDungeonSim.MaxDurationMinutes = 45
 PlayerbotDungeonSim.StuckTimeoutMinutes = 8
@@ -48,9 +46,11 @@ PlayerbotDungeonSim.RequirePlayerSameFaction = 1
 PlayerbotDungeonSim.RequirePlayerLevelRange = 1
 
 # Bot-only eligibility filter
-# Leave disabled until you confirm your Playerbot account range.
-# When enabled, only characters whose account ID is between BotAccountMin and BotAccountMax are eligible as bot candidates.
-PlayerbotDungeonSim.BotOnlyEligibilityFilter = 0
+# Strongly recommended. This keeps the module from treating real player characters as bots.
+# Your Playerbot accounts are named ashrandbot###, so prefix filtering should stay enabled.
+PlayerbotDungeonSim.BotOnlyEligibilityFilter = 1
+PlayerbotDungeonSim.BotAccountPrefix = ashrandbot
+# Optional numeric fallback. Leave 0/0 when using prefix-only filtering.
 PlayerbotDungeonSim.BotAccountMin = 0
 PlayerbotDungeonSim.BotAccountMax = 0
 

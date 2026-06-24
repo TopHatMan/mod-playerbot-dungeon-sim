@@ -32,6 +32,7 @@
 #include <vector>
 #include <unordered_set>
 #include <cctype>
+#include <string>
 
 namespace PlayerbotDungeonSim
 {
@@ -121,6 +122,7 @@ namespace PlayerbotDungeonSim
     static uint32 InviteTimeoutSeconds;
     static uint32 MaxRealPlayerInvitesPerRun;
     static bool BotOnlyEligibilityFilter;
+    static std::string BotAccountPrefix;
     static uint32 BotAccountMin;
     static uint32 BotAccountMax;
     static bool RaidMode;
@@ -242,6 +244,41 @@ namespace PlayerbotDungeonSim
         return !DisableMgr::IsDisabledFor(DISABLE_TYPE_MAP, mapId, nullptr);
     }
 
+    static std::string ToLowerCopy(std::string value)
+    {
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c)
+        {
+            return static_cast<char>(std::tolower(c));
+        });
+        return value;
+    }
+
+    static bool AccountMatchesBotFilter(uint32 accountId)
+    {
+        if (!BotOnlyEligibilityFilter)
+            return true;
+
+        bool hasPrefix = !BotAccountPrefix.empty();
+        bool hasRange = BotAccountMax >= BotAccountMin && BotAccountMax > 0;
+
+        if (!hasPrefix && !hasRange)
+            return false;
+
+        if (hasRange && accountId < BotAccountMin || hasRange && accountId > BotAccountMax)
+            return false;
+
+        if (!hasPrefix)
+            return true;
+
+        QueryResult result = LoginDatabase.Query("SELECT username FROM account WHERE id = {} LIMIT 1", accountId);
+        if (!result)
+            return false;
+
+        std::string username = ToLowerCopy(result->Fetch()[0].Get<std::string>());
+        std::string prefix = ToLowerCopy(BotAccountPrefix);
+        return username.rfind(prefix, 0) == 0;
+    }
+
     static std::vector<DungeonTemplate> LoadDungeonTemplates(uint8 team, uint8 level, bool raidOnly)
     {
         std::vector<DungeonTemplate> out;
@@ -291,21 +328,16 @@ namespace PlayerbotDungeonSim
     {
         std::vector<BotCandidate> out;
 
-        // This intentionally avoids hard-coding playerbot internals. It selects normal character rows.
-        // Later pass can filter only bot accounts once we match your Playerbots account/bot tables.
-        std::string botAccountClause;
-        if (BotOnlyEligibilityFilter && BotAccountMax >= BotAccountMin)
-            botAccountClause = Acore::StringFormat(" AND c.account BETWEEN {} AND {} ", BotAccountMin, BotAccountMax);
-
+        // Bot safety filter is applied after row load so we can check auth.account.username via LoginDatabase.
         QueryResult result = CharacterDatabase.Query(
-            "SELECT c.guid, c.name, c.level, c.race, c.class, COALESCE(g.guildid,0) "
+            "SELECT c.guid, c.name, c.level, c.race, c.class, COALESCE(g.guildid,0), c.account "
             "FROM characters c "
             "LEFT JOIN guild_member g ON g.guid = c.guid "
             "LEFT JOIN playerbot_dungeon_run_member rm ON rm.guid = c.guid "
             "LEFT JOIN playerbot_dungeon_run r ON r.id = rm.run_id AND r.state IN (0,1,4) "
-            "WHERE c.level BETWEEN {} AND {} AND r.id IS NULL {} "
+            "WHERE c.level BETWEEN {} AND {} AND r.id IS NULL "
             "ORDER BY RAND() LIMIT {}",
-            minLevel, maxLevel, botAccountClause, limit * 4);
+            minLevel, maxLevel, limit * 8);
 
         if (!result)
             return out;
@@ -320,10 +352,11 @@ namespace PlayerbotDungeonSim
             b.Race = f[3].Get<uint8>();
             b.Class = f[4].Get<uint8>();
             b.GuildId = f[5].Get<uint32>();
+            uint32 accountId = f[6].Get<uint32>();
             b.Team = GetTeamFromRace(b.Race);
             b.PreferredRole = GuessRole(b.Class);
 
-            if (b.Team == team && b.Level >= MinBotLevel)
+            if (b.Team == team && b.Level >= MinBotLevel && AccountMatchesBotFilter(accountId))
                 out.push_back(b);
         } while (result->NextRow());
 
@@ -1718,6 +1751,7 @@ public:
         InviteTimeoutSeconds = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.InviteTimeoutSeconds", 60);
         MaxRealPlayerInvitesPerRun = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.MaxRealPlayerInvitesPerRun", 1);
         BotOnlyEligibilityFilter = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.BotOnlyEligibilityFilter", false);
+        BotAccountPrefix = sConfigMgr->GetOption<std::string>("PlayerbotDungeonSim.BotAccountPrefix", "");
         BotAccountMin = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.BotAccountMin", 0);
         BotAccountMax = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.BotAccountMax", 0);
         RaidMode = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.RaidMode", true);
