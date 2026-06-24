@@ -2,19 +2,36 @@
 PlayerbotDungeonSim.Enable = 1
 PlayerbotDungeonSim.Debug = 1
 PlayerbotDungeonSim.TickSeconds = 60
-PlayerbotDungeonSim.MinBotLevel = 10
-PlayerbotDungeonSim.MaxGroupsPerTick = 2
+PlayerbotDungeonSim.MinBotLevel = 13
+PlayerbotDungeonSim.MaxGroupsPerTick = 1
 PlayerbotDungeonSim.PreferGuildGroups = 1
 PlayerbotDungeonSim.AllowPugs = 1
 PlayerbotDungeonSim.RequireFullGroup = 1
 PlayerbotDungeonSim.RealRunFirst = 1
 PlayerbotDungeonSim.SimFallback = 1
-PlayerbotDungeonSim.MinDurationMinutes = 20
-PlayerbotDungeonSim.MaxDurationMinutes = 45
+PlayerbotDungeonSim.MinDurationMinutes = 2
+PlayerbotDungeonSim.MaxDurationMinutes = 4
 PlayerbotDungeonSim.StuckTimeoutMinutes = 8
 PlayerbotDungeonSim.TeleportOnlineMembers = 1
 PlayerbotDungeonSim.CreateRealGroups = 1
-PlayerbotDungeonSim.TeleportOnlyIfOnline = 0
+PlayerbotDungeonSim.TeleportOnlyIfOnline = 1
+# When enabled, online bot members are teleported to the instance start found in areatrigger_teleport.
+# If no areatrigger is found for that dungeon, the module falls back to the outdoor entrance coords.
+PlayerbotDungeonSim.TeleportInsideInstance = 1
+# 0 = allow offline simulated runs too. 1-5 = require at least that many online/movable bots before a live attempt starts.
+# If 1, the module will NOT create fake/offline runs when no online/movable bots are found.
+# Use this for live teleport/loot testing. If 0, offline DB-only simulation is allowed.
+PlayerbotDungeonSim.RequireOnlineBotsForRun = 1
+# When live-only is enabled, mark old active moved=0 fake/offline runs as abandoned so status only shows live attempts.
+PlayerbotDungeonSim.CleanupOfflineRunsWhenLiveOnly = 1
+# Adds online/movable counts to console STATUS rows.
+PlayerbotDungeonSim.StatusShowOnlineMembers = 1
+PlayerbotDungeonSim.MinOnlineMembersForLiveRun = 1
+# Startup delay prevents DungeonSim from competing with Playerbots mass login/save activity.
+PlayerbotDungeonSim.StartupDelaySeconds = 180
+# Live test mode. 1 allows live bot group edits, bot teleports, and direct online loot delivery.
+# The bot account prefix/range filter is still mandatory and enforced before touching any online character.
+PlayerbotDungeonSim.AllowOnlineCharacterTouch = 1
 # If real players may join a bot run, do not auto-teleport anyone. Player and bots travel/summon together.
 PlayerbotDungeonSim.ManualTravelForPlayerJoinedRuns = 1
 
@@ -22,14 +39,15 @@ PlayerbotDungeonSim.ManualTravelForPlayerJoinedRuns = 1
 PlayerbotDungeonSim.AwardLoot = 1
 # First pass only gives physical items to online characters; offline winners are logged in playerbot_dungeon_loot_award.
 PlayerbotDungeonSim.GiveLootToOnlinePlayers = 1
-# Experimental. Leave 0 until the StoreNewItem -> Equip path is tested on your branch.
+# Live test order: first leave equip at 0 to test StoreNewItem safely.
+# After confirmed, set to 1 to also equip upgrades from boss loot.
 PlayerbotDungeonSim.EquipUsableLootOnline = 0
 PlayerbotDungeonSim.LootPerBossMin = 1
 PlayerbotDungeonSim.LootPerBossMax = 2
 
 # Pending loot delivery
 # Offline winners stay pending in playerbot_dungeon_loot_award until that character logs in.
-PlayerbotDungeonSim.DeliverPendingLootOnLogin = 1
+PlayerbotDungeonSim.DeliverPendingLootOnLogin = 0
 PlayerbotDungeonSim.MaxPendingDeliveriesPerLogin = 12
 # Safer than instant equip during run resolution; still experimental.
 PlayerbotDungeonSim.EquipUpgradesOnDelivery = 0
@@ -48,10 +66,13 @@ PlayerbotDungeonSim.RequirePlayerSameFaction = 1
 PlayerbotDungeonSim.RequirePlayerLevelRange = 1
 
 # Bot-only eligibility filter
-# Strongly recommended. This keeps the module from treating real player characters as bots.
-# Your Playerbot accounts are named ashrandbot###, so prefix filtering should stay enabled.
+# REQUIRED SAFETY: if this is disabled or has no prefix/range, the module disables itself at startup.
+# Best setting: import AiPlayerbot.RandomBotAccountPrefix from playerbots.conf.
+PlayerbotDungeonSim.UsePlayerbotConfig = 1
 PlayerbotDungeonSim.BotOnlyEligibilityFilter = 1
-PlayerbotDungeonSim.BotAccountPrefix = ashrandbot
+# auto = use AiPlayerbot.RandomBotAccountPrefix, for example ashrandbot.
+# You may hardcode ashrandbot here if you want to override playerbots.conf.
+PlayerbotDungeonSim.BotAccountPrefix = auto
 # Optional numeric fallback. Leave 0/0 when using prefix-only filtering.
 PlayerbotDungeonSim.BotAccountMin = 0
 PlayerbotDungeonSim.BotAccountMax = 0
@@ -92,7 +113,10 @@ PlayerbotDungeonSim.GuildChatToOnlineMembers = 1
 
 # Social simulation extras
 # Some bots will refuse a dungeon invite so group formation feels less robotic.
-PlayerbotDungeonSim.SimulatedBotDeclineChance = 15
+# By default this is flavor only and does not block actual group formation.
+PlayerbotDungeonSim.SimulatedBotDeclineChance = 8
+PlayerbotDungeonSim.SimulatedBotDeclineMaxPerGroup = 2
+PlayerbotDungeonSim.SimulatedBotDeclineBlocksGroup = 0
 
 # Console-visible fake public chat. Safe branch-compatible simulation; does not inject raw packets into real channel state.
 PlayerbotDungeonSim.GeneralChatSimulation = 1

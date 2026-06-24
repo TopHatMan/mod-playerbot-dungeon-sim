@@ -206,3 +206,149 @@ This is currently safe console-visible flavor only. The next safe implementation
 ## Mixed real-player runs
 
 When `PlayerbotDungeonSim.ManualTravelForPlayerJoinedRuns = 1`, any run that may invite a real player will not auto-teleport the player or the bot group. The player accepts the invite, then travels with the bots normally or uses existing bot summon/party commands. Bot-only runs can still auto-teleport if `TeleportOnlineMembers = 1`.
+
+
+## Zero-member run fix / safety
+
+This build allocates `playerbot_dungeon_run.id` before insert instead of using `SELECT LAST_INSERT_ID()` after async `Execute()`. On AzerothCore, async SQL can use a different DB connection, which could create active runs with `members=0`.
+
+It also refuses to run unless bot-only filtering is enabled with either `PlayerbotDungeonSim.BotAccountPrefix` or a numeric account range. For Nick's server this should be:
+
+```ini
+PlayerbotDungeonSim.BotOnlyEligibilityFilter = 1
+PlayerbotDungeonSim.BotAccountPrefix = ashrandbot
+```
+
+Old orphan active runs can be cleaned with:
+
+```sql
+UPDATE playerbot_dungeon_run r
+LEFT JOIN playerbot_dungeon_run_member rm ON rm.run_id = r.id
+SET r.state = 3, r.result = 4
+WHERE r.state IN (0,1,4) AND rm.run_id IS NULL;
+```
+
+## Live bot dungeon test mode
+
+This build supports the controlled live test flow:
+
+1. Build a bot-only group from configured bot accounts only.
+2. Create a real live group for online bot members if possible.
+3. Teleport online bot members into the instance start when `TeleportInsideInstance = 1`.
+4. Let them remain there for the run timer.
+5. Resolve the run by simulation fallback.
+6. Award loot from killed boss loot tables.
+7. Deliver loot immediately to online bot winners if `GiveLootToOnlinePlayers = 1`.
+8. Optionally equip usable upgrades if `EquipUsableLootOnline = 1`.
+
+The instance-start teleport is resolved from AzerothCore's `areatrigger_teleport` table by matching `target_map = dungeon.map_id`. If no matching areatrigger row exists, the module logs a debug message and falls back to the dungeon template's outdoor entrance coordinates.
+
+For a first live test, use short durations and store-only loot:
+
+```ini
+PlayerbotDungeonSim.AllowOnlineCharacterTouch = 1
+PlayerbotDungeonSim.CreateRealGroups = 1
+PlayerbotDungeonSim.TeleportOnlineMembers = 1
+PlayerbotDungeonSim.TeleportInsideInstance = 1
+PlayerbotDungeonSim.MinOnlineMembersForLiveRun = 1
+PlayerbotDungeonSim.InviteRealPlayers = 0
+PlayerbotDungeonSim.GiveLootToOnlinePlayers = 1
+PlayerbotDungeonSim.EquipUsableLootOnline = 0
+PlayerbotDungeonSim.DeliverPendingLootOnLogin = 0
+PlayerbotDungeonSim.MinDurationMinutes = 2
+PlayerbotDungeonSim.MaxDurationMinutes = 4
+```
+
+After `StoreNewItem` delivery is confirmed stable, test equipment replacement with:
+
+```ini
+PlayerbotDungeonSim.EquipUsableLootOnline = 1
+PlayerbotDungeonSim.OnlyEquipBetterItems = 1
+```
+
+Hard safety remains: online movement and direct loot delivery call the bot account filter again before touching any `Player*`. On Nick's server, only accounts whose username starts with `ashrandbot` should be eligible.
+
+
+## Playerbot config import
+
+The module can now read the important Playerbots account settings directly from `playerbots.conf` through `sConfigMgr`.
+
+Recommended:
+
+```ini
+PlayerbotDungeonSim.UsePlayerbotConfig = 1
+PlayerbotDungeonSim.BotOnlyEligibilityFilter = 1
+PlayerbotDungeonSim.BotAccountPrefix = auto
+```
+
+With `auto`, DungeonSim uses `AiPlayerbot.RandomBotAccountPrefix` from Playerbots, for example `ashrandbot`.
+This keeps DungeonSim from touching real player accounts when the Playerbot prefix changes.
+
+DungeonSim also logs the imported Playerbot values at startup: prefix, account count, random bot autologin flags, min/max random bots, and disabled-without-real-player state.
+
+
+## Live-only testing
+
+If you want to verify that real online Playerbot characters are actually grouped, moved, and rewarded, enable:
+
+```ini
+PlayerbotDungeonSim.AllowOnlineCharacterTouch = 1
+PlayerbotDungeonSim.RequireOnlineBotsForRun = 1
+PlayerbotDungeonSim.MinOnlineMembersForLiveRun = 1
+PlayerbotDungeonSim.CreateRealGroups = 1
+PlayerbotDungeonSim.TeleportOnlineMembers = 1
+PlayerbotDungeonSim.GiveLootToOnlinePlayers = 1
+```
+
+With `RequireOnlineBotsForRun = 1`, a dungeon run will not start as offline simulation when zero online/movable bots are available. Console lines should skip the run instead of creating `members=5 moved=0` fake-only runs.
+
+SQL note: `playerbot_dungeon_run` and `playerbot_dungeon_run_member` are character-database tables. If cleaning old test runs manually, select/use the characters database, not world.
+
+
+## Live visibility tuning
+
+For a real-bot test, set:
+
+```ini
+PlayerbotDungeonSim.RequireOnlineBotsForRun = 1
+PlayerbotDungeonSim.CleanupOfflineRunsWhenLiveOnly = 1
+PlayerbotDungeonSim.StatusShowOnlineMembers = 1
+```
+
+Console status will show `members`, `online`, `movable`, and `moved`. If `moved=0`, no online bot was teleported, and `/who` will not show a bot inside the dungeon.
+
+## Live dungeon test checklist
+
+This build includes forced SQL installer updates:
+
+- `data/sql/db-world/updates/2026_06_24_99_playerbot_dungeon_sim_force_world_install.sql`
+- `data/sql/db-characters/updates/2026_06_24_99_playerbot_dungeon_sim_force_characters_install.sql`
+
+The runtime tables such as `playerbot_dungeon_run`, `playerbot_dungeon_run_member`, and `playerbot_dungeon_loot_award` belong in the **characters** database, not world.
+
+For a live visual test, use:
+
+```ini
+PlayerbotDungeonSim.UsePlayerbotConfig = 1
+PlayerbotDungeonSim.BotOnlyEligibilityFilter = 1
+PlayerbotDungeonSim.BotAccountPrefix = auto
+PlayerbotDungeonSim.RequireOnlineBotsForRun = 1
+PlayerbotDungeonSim.MinOnlineMembersForLiveRun = 1
+PlayerbotDungeonSim.AllowOnlineCharacterTouch = 1
+PlayerbotDungeonSim.CreateRealGroups = 1
+PlayerbotDungeonSim.TeleportOnlineMembers = 1
+PlayerbotDungeonSim.TeleportInsideInstance = 1
+PlayerbotDungeonSim.InviteRealPlayers = 0
+PlayerbotDungeonSim.GiveLootToOnlinePlayers = 1
+PlayerbotDungeonSim.EquipUsableLootOnline = 0
+PlayerbotDungeonSim.MinDurationMinutes = 2
+PlayerbotDungeonSim.MaxDurationMinutes = 4
+```
+
+Expected console status for a real live run:
+
+```text
+members=5 online=1 movable=1 moved=1
+```
+
+If it says `moved=0`, the run is not visually inside the dungeon.
