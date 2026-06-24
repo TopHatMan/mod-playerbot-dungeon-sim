@@ -1,0 +1,4 @@
+ALTER TABLE `playerbot_dungeon_loot_award`
+  ADD COLUMN IF NOT EXISTS `source_boss_order` TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER `source_boss`,
+  ADD COLUMN IF NOT EXISTS `stored_online` TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER `equipped`,
+  ADD COLUMN IF NOT EXISTS `note` VARCHAR(255) NOT NULL DEFAULT '' AFTER `stored_online`;

@@ -1,0 +1,89 @@
+# mod-playerbot-dungeon-sim
+PlayerbotDungeonSim.Enable = 1
+PlayerbotDungeonSim.Debug = 1
+PlayerbotDungeonSim.TickSeconds = 60
+PlayerbotDungeonSim.MinBotLevel = 10
+PlayerbotDungeonSim.MaxGroupsPerTick = 2
+PlayerbotDungeonSim.PreferGuildGroups = 1
+PlayerbotDungeonSim.AllowPugs = 1
+PlayerbotDungeonSim.RequireFullGroup = 1
+PlayerbotDungeonSim.RealRunFirst = 1
+PlayerbotDungeonSim.SimFallback = 1
+PlayerbotDungeonSim.InviteRealPlayers = 0
+PlayerbotDungeonSim.InviteTimeoutSeconds = 60
+PlayerbotDungeonSim.MinDurationMinutes = 20
+PlayerbotDungeonSim.MaxDurationMinutes = 45
+PlayerbotDungeonSim.StuckTimeoutMinutes = 8
+PlayerbotDungeonSim.TeleportOnlineMembers = 1
+PlayerbotDungeonSim.CreateRealGroups = 1
+PlayerbotDungeonSim.TeleportOnlyIfOnline = 0
+
+# Loot simulation
+PlayerbotDungeonSim.AwardLoot = 1
+# First pass only gives physical items to online characters; offline winners are logged in playerbot_dungeon_loot_award.
+PlayerbotDungeonSim.GiveLootToOnlinePlayers = 1
+# Experimental. Leave 0 until the StoreNewItem -> Equip path is tested on your branch.
+PlayerbotDungeonSim.EquipUsableLootOnline = 0
+PlayerbotDungeonSim.LootPerBossMin = 1
+PlayerbotDungeonSim.LootPerBossMax = 2
+
+# Pending loot delivery
+# Offline winners stay pending in playerbot_dungeon_loot_award until that character logs in.
+PlayerbotDungeonSim.DeliverPendingLootOnLogin = 1
+PlayerbotDungeonSim.MaxPendingDeliveriesPerLogin = 12
+# Safer than instant equip during run resolution; still experimental.
+PlayerbotDungeonSim.EquipUpgradesOnDelivery = 0
+# When equipping is enabled, avoid replacing sidegrades or worse items.
+PlayerbotDungeonSim.OnlyEquipBetterItems = 1
+
+# Real player invite support
+# When enabled, eligible ungrouped real players can be asked to fill/assist a bot dungeon run.
+PlayerbotDungeonSim.InviteRealPlayers = 0
+# 0 = invite even when a full bot group exists, 1 = only invite if the group is short.
+PlayerbotDungeonSim.InviteOnlyIfGroupShort = 0
+PlayerbotDungeonSim.InviteTimeoutSeconds = 60
+PlayerbotDungeonSim.MaxRealPlayerInvitesPerRun = 1
+PlayerbotDungeonSim.RequirePlayerPartyless = 1
+PlayerbotDungeonSim.RequirePlayerSameFaction = 1
+PlayerbotDungeonSim.RequirePlayerLevelRange = 1
+
+# Bot-only eligibility filter
+# Leave disabled until you confirm your Playerbot account range.
+# When enabled, only characters whose account ID is between BotAccountMin and BotAccountMax are eligible as bot candidates.
+PlayerbotDungeonSim.BotOnlyEligibilityFilter = 0
+PlayerbotDungeonSim.BotAccountMin = 0
+PlayerbotDungeonSim.BotAccountMax = 0
+
+# Raid mode
+# Raid templates are ignored until the realm's MaxPlayerLevel is at least RaidMinServerLevelCap.
+# Example: with MaxPlayerLevel = 40, Molten Core min_level 60 will never be selected.
+PlayerbotDungeonSim.RaidMode = 1
+PlayerbotDungeonSim.RaidMinServerLevelCap = 60
+# Chance to choose a raid run once the random selected level is at/above the raid cap.
+PlayerbotDungeonSim.RaidChanceAtCap = 30
+# Bot simulation does not require attunement quests. Real players are not granted attunement by this module.
+PlayerbotDungeonSim.RaidWaiveBotAttunement = 1
+# Guild/PUG raid groups remember their best boss depth and progress slowly week to week.
+PlayerbotDungeonSim.RaidUseProgressMemory = 1
+
+# Vanilla progression / lockouts
+# Normal Vanilla 5-man dungeons do not use saved lockouts.
+PlayerbotDungeonSim.NormalDungeonLockouts = 0
+# Raids use weekly-style simulated lockouts for guild/PUG raid teams.
+PlayerbotDungeonSim.RaidLockouts = 1
+PlayerbotDungeonSim.RaidLockoutDays = 7
+# Stops raid templates from appearing before their Vanilla patch phase.
+# 0 MC/Ony, 4 BWL, 5 ZG, 6 AQ20/AQ40, 7 Naxx40.
+PlayerbotDungeonSim.RespectProgressionPhase = 1
+PlayerbotDungeonSim.ProgressionPhase = 0
+
+# Console + guild simulation output
+# Prints active dungeon/raid run status to worldserver console.
+PlayerbotDungeonSim.ConsoleStatus = 1
+PlayerbotDungeonSim.ConsoleStatusSeconds = 120
+
+# Simulated guild chatter when a guild group forms or finishes a run.
+# This is sent to console and, if enabled, to online members of that guild as a green system message.
+PlayerbotDungeonSim.GuildChatSimulation = 1
+PlayerbotDungeonSim.GuildChatChance = 75
+PlayerbotDungeonSim.GuildChatToOnlineMembers = 1
