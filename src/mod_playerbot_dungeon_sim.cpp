@@ -140,6 +140,18 @@ namespace PlayerbotDungeonSim
     static bool GuildChatSimulation;
     static uint32 GuildChatChance;
     static bool GuildChatToOnlineMembers;
+    static bool GeneralChatSimulation;
+    static uint32 GeneralChatChance;
+    static bool LocalZoneChatSimulation;
+    static uint32 LocalZoneChatChance;
+    static uint32 SimulatedBotDeclineChance;
+    static bool OrganicLfgActing;
+    static uint32 OrganicLfgChance;
+    static bool RestrictOrganicCitiesToClassic;
+    static bool TradeChatSimulation;
+    static uint32 TradeChatChance;
+    static uint32 TradeChatEveryTicks;
+    static uint32 _tradeTickCounter = 0;
 
     static uint32 _timerMs = 0;
     static uint32 _statusTimerMs = 0;
@@ -345,6 +357,31 @@ namespace PlayerbotDungeonSim
         return std::clamp(score, 1, 100);
     }
 
+    static bool ShouldSimulatedBotDecline(BotCandidate const& bot, DungeonTemplate const& dungeon)
+    {
+        if (SimulatedBotDeclineChance == 0)
+            return false;
+
+        if (urand(1, 100) > SimulatedBotDeclineChance)
+            return false;
+
+        static char const* reasons[] =
+        {
+            "nah, finishing quests right now",
+            "can't, bags are full",
+            "maybe later",
+            "repairing first",
+            "not enough time for that run",
+            "saving my gold tonight"
+        };
+
+        std::string reason = reasons[urand(0, 5)];
+        StatusLog("[SocialSim] " + bot.Name + " declined " + dungeon.Name + ": " + reason);
+        // Guild-specific decline chatter is handled after guild chat helpers are available; keep this branch-safe here.
+
+        return true;
+    }
+
     static bool BuildGroup(std::vector<BotCandidate>& candidates, DungeonTemplate const& dungeon, std::vector<BotCandidate>& group)
     {
         group.clear();
@@ -367,7 +404,7 @@ namespace PlayerbotDungeonSim
 
                 std::vector<BotCandidate> sameGuild;
                 for (BotCandidate const& b : candidates)
-                    if (b.GuildId == seed.GuildId)
+                    if (b.GuildId == seed.GuildId && !ShouldSimulatedBotDecline(b, dungeon))
                         sameGuild.push_back(b);
 
                 if (sameGuild.size() >= dungeon.GroupSize)
@@ -386,7 +423,7 @@ namespace PlayerbotDungeonSim
         {
             if (group.size() >= dungeon.GroupSize)
                 break;
-            if (!hasTank && b.PreferredRole == ROLE_TANK)
+            if (!hasTank && b.PreferredRole == ROLE_TANK && !ShouldSimulatedBotDecline(b, dungeon))
             {
                 group.push_back(b); hasTank = true;
             }
@@ -395,7 +432,7 @@ namespace PlayerbotDungeonSim
         {
             if (group.size() >= dungeon.GroupSize)
                 break;
-            if (!hasHealer && b.PreferredRole == ROLE_HEALER)
+            if (!hasHealer && b.PreferredRole == ROLE_HEALER && !ShouldSimulatedBotDecline(b, dungeon))
             {
                 group.push_back(b); hasHealer = true;
             }
@@ -405,7 +442,7 @@ namespace PlayerbotDungeonSim
             if (group.size() >= dungeon.GroupSize)
                 break;
             bool exists = std::any_of(group.begin(), group.end(), [&](BotCandidate const& g) { return g.GuidLow == b.GuidLow; });
-            if (!exists)
+            if (!exists && !ShouldSimulatedBotDecline(b, dungeon))
                 group.push_back(b);
         }
 
@@ -462,6 +499,174 @@ namespace PlayerbotDungeonSim
             msg = "Guild group heading into " + dungeon.Name + ". Wish us luck.";
 
         SendGuildSimulationMessage(guildId, speaker.Name, msg);
+    }
+
+    static std::string CapitalCityName(uint8 team)
+    {
+        return team == TEAM_HORDE ? "Orgrimmar" : "Stormwind";
+    }
+
+    static void SendAmbientChatMessage(std::string const& channel, std::string const& speakerName, std::string const& message)
+    {
+        // This is intentionally console/system style instead of injecting raw packets into a real channel.
+        // It gives visibility without risking channel state issues on different AzerothCore branches.
+        StatusLog("[" + channel + "] " + speakerName + ": " + message);
+    }
+
+    static void MaybeSendGeneralLfg(std::vector<BotCandidate> const& group, DungeonTemplate const& dungeon)
+    {
+        if (!GeneralChatSimulation || group.empty())
+            return;
+
+        if (urand(1, 100) <= GeneralChatChance)
+        {
+            BotCandidate const& speaker = group[urand(0, uint32(group.size() - 1))];
+            std::string msg = "LFM " + dungeon.Name + " - " + TeamName(speaker.Team) + " group forming, pst.";
+            SendAmbientChatMessage("GeneralSim:" + CapitalCityName(speaker.Team), speaker.Name, msg);
+        }
+
+        if (LocalZoneChatSimulation && urand(1, 100) <= LocalZoneChatChance)
+        {
+            BotCandidate const& speaker = group[urand(0, uint32(group.size() - 1))];
+            std::string msg = "Anyone near " + dungeon.Name + "? Group heading in soon.";
+            SendAmbientChatMessage("LocalSim:" + dungeon.Name, speaker.Name, msg);
+        }
+    }
+
+    static std::string ClassicCapitalCityName(uint8 team)
+    {
+        if (!RestrictOrganicCitiesToClassic)
+            return CapitalCityName(team);
+
+        if (team == TEAM_HORDE)
+        {
+            static char const* cities[] = { "Orgrimmar", "Thunder Bluff", "Undercity" };
+            return cities[urand(0, 2)];
+        }
+
+        static char const* cities[] = { "Stormwind", "Ironforge", "Darnassus" };
+        return cities[urand(0, 2)];
+    }
+
+    static std::string RoleText(Role role)
+    {
+        switch (role)
+        {
+            case ROLE_TANK: return "tank";
+            case ROLE_HEALER: return "heal";
+            case ROLE_DPS: return "dps";
+            default: return "dps";
+        }
+    }
+
+    static std::string ClassSpecText(uint8 cls, Role role)
+    {
+        switch (cls)
+        {
+            case CLASS_WARRIOR: return role == ROLE_TANK ? "prot warrior" : "arms warrior";
+            case CLASS_PALADIN: return role == ROLE_HEALER ? "holy paladin" : (role == ROLE_TANK ? "prot paladin" : "ret paladin");
+            case CLASS_HUNTER: return "marks hunter";
+            case CLASS_ROGUE: return "combat rogue";
+            case CLASS_PRIEST: return role == ROLE_HEALER ? (urand(0, 1) ? "holy priest" : "disc priest") : "shadow priest";
+            case CLASS_SHAMAN: return role == ROLE_HEALER ? "resto shaman" : "enh shaman";
+            case CLASS_MAGE: return urand(0, 1) ? "frost mage" : "fire mage";
+            case CLASS_WARLOCK: return "aff lock";
+            case CLASS_DRUID: return role == ROLE_HEALER ? "resto druid" : (role == ROLE_TANK ? "feral tank" : "feral dps");
+            default: return RoleText(role);
+        }
+    }
+
+    static void SendOrganicLfgActing(std::vector<BotCandidate> const& group, DungeonTemplate const& dungeon)
+    {
+        if (!OrganicLfgActing || group.empty())
+            return;
+
+        if (urand(1, 100) > OrganicLfgChance)
+            return;
+
+        std::string city = ClassicCapitalCityName(group.front().Team);
+        BotCandidate const& leader = group.front();
+
+        static char const* openers[] =
+        {
+            "LFM {} need tank/heals/dps",
+            "forming {} pst role",
+            "LFG/LFM {} whisper me",
+            "{} group starting, need a few more"
+        };
+
+        std::string opener = Acore::StringFormat(openers[urand(0, 3)], dungeon.Name);
+        SendAmbientChatMessage("GeneralSim:" + city, leader.Name, opener);
+
+        uint32 lines = std::min<uint32>(uint32(group.size()), urand(2, std::min<uint32>(5, uint32(group.size()))));
+        for (uint32 i = 0; i < lines; ++i)
+        {
+            BotCandidate const& b = group[i];
+            std::string spec = ClassSpecText(b.Class, b.PreferredRole);
+            std::string msg;
+
+            switch (b.PreferredRole)
+            {
+                case ROLE_TANK:
+                    msg = urand(0, 1) ? "I can tank" : "tank here " + spec;
+                    break;
+                case ROLE_HEALER:
+                    msg = urand(0, 1) ? "I can heal" : spec + " heals";
+                    break;
+                default:
+                    msg = urand(0, 1) ? "dps here" : spec + " dps";
+                    break;
+            }
+
+            SendAmbientChatMessage("GeneralSim:" + city, b.Name, msg);
+        }
+
+        if (LocalZoneChatSimulation && urand(1, 100) <= LocalZoneChatChance)
+        {
+            BotCandidate const& b = group[urand(0, uint32(group.size() - 1))];
+            SendAmbientChatMessage("LocalSim:" + dungeon.Name, b.Name, "summons? at stone? heading to " + dungeon.Name);
+        }
+    }
+
+    static void MaybeSendTradeBoeSpam()
+    {
+        if (!TradeChatSimulation || !GeneralChatSimulation)
+            return;
+
+        if (TradeChatEveryTicks > 1)
+        {
+            ++_tradeTickCounter;
+            if ((_tradeTickCounter % TradeChatEveryTicks) != 0)
+                return;
+        }
+
+        if (urand(1, 100) > TradeChatChance)
+            return;
+
+        uint8 team = urand(0, 1) ? TEAM_ALLIANCE : TEAM_HORDE;
+        std::string city = ClassicCapitalCityName(team);
+
+        QueryResult result = CharacterDatabase.Query(
+            "SELECT c.name FROM characters c WHERE c.level >= {} ORDER BY RAND() LIMIT 1",
+            MinBotLevel);
+
+        std::string seller = result ? result->Fetch()[0].Get<std::string>() : "Auctioneer";
+
+        static char const* fakeBoes[] =
+        {
+            "green mail boots",
+            "blue 2h axe",
+            "cloth int shoulders",
+            "agi leather belt",
+            "boe wand",
+            "twink sword",
+            "of the bear chest",
+            "of the eagle staff"
+        };
+
+        uint32 priceGold = urand(2, 25);
+        std::string msg = Acore::StringFormat("WTS {} {}g can COD", fakeBoes[urand(0, 7)], priceGold);
+        SendAmbientChatMessage("TradeSim:" + city, seller, msg);
     }
 
     static bool IsPlayerSafeToMove(Player* player)
@@ -811,6 +1016,8 @@ namespace PlayerbotDungeonSim
         SaveRunLockout(dungeon, group.front().Team, guildId);
 
         MaybeSendGuildLfm(group, dungeon);
+        MaybeSendGeneralLfg(group, dungeon);
+        SendOrganicLfgActing(group, dungeon);
         CreateRealPlayerInvites(runId, dungeon, group);
 
         for (BotCandidate const& b : group)
@@ -1530,6 +1737,17 @@ public:
         GuildChatSimulation = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.GuildChatSimulation", true);
         GuildChatChance = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.GuildChatChance", 75);
         GuildChatToOnlineMembers = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.GuildChatToOnlineMembers", true);
+        GeneralChatSimulation = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.GeneralChatSimulation", true);
+        GeneralChatChance = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.GeneralChatChance", 50);
+        LocalZoneChatSimulation = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.LocalZoneChatSimulation", true);
+        LocalZoneChatChance = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.LocalZoneChatChance", 35);
+        SimulatedBotDeclineChance = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.SimulatedBotDeclineChance", 15);
+        OrganicLfgActing = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.OrganicLfgActing", true);
+        OrganicLfgChance = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.OrganicLfgChance", 85);
+        RestrictOrganicCitiesToClassic = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.RestrictOrganicCitiesToClassic", true);
+        TradeChatSimulation = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.TradeChatSimulation", true);
+        TradeChatChance = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.TradeChatChance", 20);
+        TradeChatEveryTicks = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.TradeChatEveryTicks", 3);
 
         if (MinDurationMinutes > MaxDurationMinutes)
             std::swap(MinDurationMinutes, MaxDurationMinutes);
@@ -1540,6 +1758,14 @@ public:
         if (MaxPendingDeliveriesPerLogin == 0)
             MaxPendingDeliveriesPerLogin = 1;
         RaidChanceAtCap = std::min<uint32>(RaidChanceAtCap, 100);
+        GuildChatChance = std::min<uint32>(GuildChatChance, 100);
+        GeneralChatChance = std::min<uint32>(GeneralChatChance, 100);
+        LocalZoneChatChance = std::min<uint32>(LocalZoneChatChance, 100);
+        SimulatedBotDeclineChance = std::min<uint32>(SimulatedBotDeclineChance, 100);
+        OrganicLfgChance = std::min<uint32>(OrganicLfgChance, 100);
+        TradeChatChance = std::min<uint32>(TradeChatChance, 100);
+        if (TradeChatEveryTicks == 0)
+            TradeChatEveryTicks = 1;
         if (RaidMinServerLevelCap == 0)
             RaidMinServerLevelCap = 60;
         if (RaidLockoutDays == 0)

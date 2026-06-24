@@ -160,3 +160,45 @@ void Addmod_playerbot_dungeon_simScripts()
 ```
 
 This fixes linker error `LNK2019 unresolved external symbol Addmod_playerbot_dungeon_simScripts`.
+
+## Social / LFG simulation
+
+The module now simulates social friction and public LFG chatter:
+
+- `PlayerbotDungeonSim.SimulatedBotDeclineChance` makes some candidate bots say no before a group is formed.
+- Guild groups can still announce inside the guild sim.
+- `GeneralChatSimulation` prints city-style LFM messages such as `[GeneralSim:Stormwind] Botname: LFM Deadmines...`.
+- `LocalZoneChatSimulation` prints dungeon-local chatter such as `[LocalSim:Scarlet Monastery] Botname: Anyone near Scarlet Monastery?`.
+
+These public messages are intentionally branch-safe console/system simulation messages for now. They do not inject raw chat packets into live General channel state, which differs between AzerothCore branches.
+
+## Organic LFG acting layer
+
+The dungeon group is still formed internally first, but the module can now make the bots act out the social flow before the run starts.
+
+Example console lines:
+
+```text
+[GeneralSim:Ironforge] Brokkar: LFM Deadmines need tank/heals/dps
+[GeneralSim:Ironforge] Miralyn: I can heal
+[GeneralSim:Ironforge] Thandor: tank here prot warrior
+[GeneralSim:Ironforge] Kelri: frost mage dps
+[LocalSim:Deadmines] Kelri: summons? at stone? heading to Deadmines
+```
+
+Classic-capital restriction is on by default, so simulated public chat uses only:
+
+- Alliance: Stormwind, Ironforge, Darnassus
+- Horde: Orgrimmar, Thunder Bluff, Undercity
+
+No Exodar or Silvermoon while the realm is progression-centered in Vanilla.
+
+## Trade BOE / COD flavor
+
+The module can also print occasional TradeSim spam:
+
+```text
+[TradeSim:Stormwind] Arlena: WTS blue 2h axe 14g can COD
+```
+
+This is currently safe console-visible flavor only. The next safe implementation step would be a real `playerbot_dungeon_trade_offer` table plus a player chat response such as `cod yes`, then server-side COD mail creation once we wire it to your branch's mail API.

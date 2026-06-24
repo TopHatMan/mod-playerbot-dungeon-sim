@@ -87,3 +87,27 @@ PlayerbotDungeonSim.ConsoleStatusSeconds = 120
 PlayerbotDungeonSim.GuildChatSimulation = 1
 PlayerbotDungeonSim.GuildChatChance = 75
 PlayerbotDungeonSim.GuildChatToOnlineMembers = 1
+
+# Social simulation extras
+# Some bots will refuse a dungeon invite so group formation feels less robotic.
+PlayerbotDungeonSim.SimulatedBotDeclineChance = 15
+
+# Console-visible fake public chat. Safe branch-compatible simulation; does not inject raw packets into real channel state.
+PlayerbotDungeonSim.GeneralChatSimulation = 1
+PlayerbotDungeonSim.GeneralChatChance = 50
+PlayerbotDungeonSim.LocalZoneChatSimulation = 1
+PlayerbotDungeonSim.LocalZoneChatChance = 35
+
+# Organic LFG acting layer
+# The group is already chosen internally, but bots act out the LFG conversation in classic cities.
+PlayerbotDungeonSim.OrganicLfgActing = 1
+PlayerbotDungeonSim.OrganicLfgChance = 85
+# Keep simulated public chat to Vanilla capitals only: SW/IF/Darn, Org/TB/UC. No Exodar/Silvermoon.
+PlayerbotDungeonSim.RestrictOrganicCitiesToClassic = 1
+
+# Trade chat BOE flavor simulation
+# Console-visible only for now: shows WTS BOE/COD-style spam in classic capital TradeSim channels.
+PlayerbotDungeonSim.TradeChatSimulation = 1
+PlayerbotDungeonSim.TradeChatChance = 20
+# Only try trade flavor every N world ticks to avoid spam.
+PlayerbotDungeonSim.TradeChatEveryTicks = 3
