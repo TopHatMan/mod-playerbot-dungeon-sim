@@ -1,11 +1,55 @@
-ALTER TABLE `playerbot_dungeon_loot_award`
-  ADD COLUMN IF NOT EXISTS `delivery_state` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0 pending, 1 failed, 2 delivered' AFTER `stored_online`,
-  ADD COLUMN IF NOT EXISTS `delivered_at` INT UNSIGNED NOT NULL DEFAULT 0 AFTER `delivery_state`,
-  ADD COLUMN IF NOT EXISTS `upgrade_score` INT UNSIGNED NOT NULL DEFAULT 0 AFTER `delivered_at`,
-  ADD COLUMN IF NOT EXISTS `equip_slot` TINYINT UNSIGNED NOT NULL DEFAULT 255 AFTER `upgrade_score`,
-  ADD KEY IF NOT EXISTS `idx_delivery` (`guid`, `delivery_state`);
+-- MySQL 5.7 / AzerothCore updater safe version.
+-- Adds pending-loot delivery fields and index only when missing.
 
-UPDATE `playerbot_dungeon_loot_award`
-SET `delivery_state` = CASE WHEN `stored_online` = 1 THEN 2 ELSE 0 END,
-    `delivered_at` = CASE WHEN `stored_online` = 1 THEN `awarded_at` ELSE 0 END
-WHERE `delivery_state` = 0;
+DROP PROCEDURE IF EXISTS `playerbot_dungeon_sim_add_column`;
+DROP PROCEDURE IF EXISTS `playerbot_dungeon_sim_add_index`;
+DELIMITER $$
+CREATE PROCEDURE `playerbot_dungeon_sim_add_column`(
+    IN p_table VARCHAR(64),
+    IN p_column VARCHAR(64),
+    IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = p_table
+          AND COLUMN_NAME = p_column
+    ) THEN
+        SET @s = CONCAT('ALTER TABLE `', p_table, '` ADD COLUMN `', p_column, '` ', p_definition);
+        PREPARE stmt FROM @s;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+
+CREATE PROCEDURE `playerbot_dungeon_sim_add_index`(
+    IN p_table VARCHAR(64),
+    IN p_index VARCHAR(64),
+    IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = p_table
+          AND INDEX_NAME = p_index
+    ) THEN
+        SET @s = CONCAT('ALTER TABLE `', p_table, '` ADD ', p_definition);
+        PREPARE stmt FROM @s;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+CALL `playerbot_dungeon_sim_add_column`('playerbot_dungeon_loot_award', 'delivery_state', 'TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT ''0 pending, 1 failed, 2 delivered'' AFTER `stored_online`');
+CALL `playerbot_dungeon_sim_add_column`('playerbot_dungeon_loot_award', 'delivered_at', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER `delivery_state`');
+CALL `playerbot_dungeon_sim_add_column`('playerbot_dungeon_loot_award', 'upgrade_score', 'INT UNSIGNED NOT NULL DEFAULT 0 AFTER `delivered_at`');
+CALL `playerbot_dungeon_sim_add_column`('playerbot_dungeon_loot_award', 'equip_slot', 'TINYINT UNSIGNED NOT NULL DEFAULT 255 AFTER `upgrade_score`');
+CALL `playerbot_dungeon_sim_add_index`('playerbot_dungeon_loot_award', 'idx_delivery', 'KEY `idx_delivery` (`guid`, `delivery_state`)');
+
+DROP PROCEDURE IF EXISTS `playerbot_dungeon_sim_add_index`;
+DROP PROCEDURE IF EXISTS `playerbot_dungeon_sim_add_column`;
