@@ -202,3 +202,7 @@ The module can also print occasional TradeSim spam:
 ```
 
 This is currently safe console-visible flavor only. The next safe implementation step would be a real `playerbot_dungeon_trade_offer` table plus a player chat response such as `cod yes`, then server-side COD mail creation once we wire it to your branch's mail API.
+
+## Mixed real-player runs
+
+When `PlayerbotDungeonSim.ManualTravelForPlayerJoinedRuns = 1`, any run that may invite a real player will not auto-teleport the player or the bot group. The player accepts the invite, then travels with the bots normally or uses existing bot summon/party commands. Bot-only runs can still auto-teleport if `TeleportOnlineMembers = 1`.

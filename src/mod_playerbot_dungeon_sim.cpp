@@ -107,6 +107,7 @@ namespace PlayerbotDungeonSim
     static bool TeleportOnlineMembers;
     static bool CreateRealGroups;
     static bool TeleportOnlyIfOnline;
+    static bool ManualTravelForPlayerJoinedRuns;
     static bool AwardLoot;
     static bool GiveLootToOnlinePlayers;
     static bool EquipUsableLootOnline;
@@ -859,7 +860,7 @@ namespace PlayerbotDungeonSim
                 runId, guidLow, dungeon.Id, now, now + InviteTimeoutSeconds, leaderName);
 
             ChatHandler(target->GetSession()).PSendSysMessage(
-                "{} asks: Want to join a {} run? Type 'yes' or 'no' in say chat within {} seconds. If you accept, you may be grouped and teleported.",
+                "{} asks: Want to join a {} run? Type 'yes' or 'no' in say chat within {} seconds. If you accept, no auto-teleport will happen; travel together or summon bots with bot commands.",
                 group.front().Name, dungeon.Name, InviteTimeoutSeconds);
         }
     }
@@ -943,10 +944,9 @@ namespace PlayerbotDungeonSim
         CharacterDatabase.Execute("UPDATE playerbot_dungeon_player_invite SET state = 1, responded_at = {} WHERE run_id = {} AND player_guid = {}",
             now, runId, guidLow);
 
-        if (TeleportOnlineMembers)
-            player->TeleportTo(entranceMap, x, y, z, o);
-
-        ChatHandler(player->GetSession()).PSendSysMessage("You accepted the dungeon group invite for {}.", dungeon.Name);
+        // Real players should not be yanked by DungeonSim.
+        // Mixed player+bot runs use manual travel/summon behavior so the player and bots can journey together.
+        ChatHandler(player->GetSession()).PSendSysMessage("You accepted the dungeon group invite for {}. No teleport was used; travel together or summon the bots with your bot commands.", dungeon.Name);
         DebugLog("Real player " + player->GetName() + " accepted dungeon sim run #" + std::to_string(runId));
         return true;
     }
@@ -1023,10 +1023,18 @@ namespace PlayerbotDungeonSim
         }
 
         bool madeLiveGroup = RealRunFirst && CreateLiveGroupIfPossible(group);
-        uint32 movedOnline = RealRunFirst ? TeleportOnlineGroupMembers(group, dungeon) : 0;
+
+        // Bot-only runs may auto-teleport. Runs that may invite a real player should not yank anyone,
+        // because those are meant to feel like a real party that travels/summons together.
+        bool mayInviteRealPlayer = InviteRealPlayers && MaxRealPlayerInvitesPerRun > 0 && (!InviteOnlyIfGroupShort || group.size() < dungeon.GroupSize);
+        bool allowAutoTeleport = TeleportOnlineMembers && !(ManualTravelForPlayerJoinedRuns && mayInviteRealPlayer);
+        uint32 movedOnline = (RealRunFirst && allowAutoTeleport) ? TeleportOnlineGroupMembers(group, dungeon) : 0;
         uint8 initialState = (RealRunFirst && movedOnline > 0) ? RUN_REAL_ATTEMPT : RUN_ACTIVE;
 
-        if (TeleportOnlyIfOnline && RealRunFirst && movedOnline == 0)
+        if (ManualTravelForPlayerJoinedRuns && mayInviteRealPlayer)
+            DebugLog("Manual travel mode for " + dungeon.Name + ": real-player invite possible, no auto-teleport used.");
+
+        if (TeleportOnlyIfOnline && RealRunFirst && allowAutoTeleport && movedOnline == 0)
         {
             DebugLog("Skipped run for " + dungeon.Name + " because no online members could be teleported.");
             return;
@@ -1736,6 +1744,7 @@ public:
         TeleportOnlineMembers = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.TeleportOnlineMembers", true);
         CreateRealGroups = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.CreateRealGroups", true);
         TeleportOnlyIfOnline = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.TeleportOnlyIfOnline", false);
+        ManualTravelForPlayerJoinedRuns = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.ManualTravelForPlayerJoinedRuns", true);
         AwardLoot = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.AwardLoot", true);
         GiveLootToOnlinePlayers = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.GiveLootToOnlinePlayers", true);
         EquipUsableLootOnline = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.EquipUsableLootOnline", false);

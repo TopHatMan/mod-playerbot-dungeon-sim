@@ -15,6 +15,8 @@ PlayerbotDungeonSim.StuckTimeoutMinutes = 8
 PlayerbotDungeonSim.TeleportOnlineMembers = 1
 PlayerbotDungeonSim.CreateRealGroups = 1
 PlayerbotDungeonSim.TeleportOnlyIfOnline = 0
+# If real players may join a bot run, do not auto-teleport anyone. Player and bots travel/summon together.
+PlayerbotDungeonSim.ManualTravelForPlayerJoinedRuns = 1
 
 # Loot simulation
 PlayerbotDungeonSim.AwardLoot = 1
