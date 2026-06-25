@@ -7,3 +7,8 @@ If AzerothCore auto-updater does not create the tables, run these manually again
    data/sql/db-characters/updates/2026_06_24_99_playerbot_dungeon_sim_force_characters_install.sql
 
 Do not run the character install against world. The runtime tables such as playerbot_dungeon_run live in CHARACTERS.
+
+XP awards table added in the XP build:
+
+Against your CHARACTERS database:
+   data/sql/manual/characters_xp_awards.sql

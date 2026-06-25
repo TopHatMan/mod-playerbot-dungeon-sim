@@ -27,14 +27,20 @@
 #include "Chat.h"
 #include "Item.h"
 #include "ItemTemplate.h"
+#include "MotionMaster.h"
 
 #include <algorithm>
 #include <vector>
 #include <unordered_set>
 #include <cctype>
 #include <string>
+#include <iterator>
 #include <map>
 #include <sstream>
+#include <cmath>
+#include <fstream>
+#include <iomanip>
+#include <ctime>
 
 namespace PlayerbotDungeonSim
 {
@@ -62,6 +68,12 @@ namespace PlayerbotDungeonSim
         ROLE_TANK = 1,
         ROLE_HEALER = 2,
         ROLE_DPS = 3
+    };
+
+    enum RunExecutionMode : uint8
+    {
+        RUN_MODE_SIM = 0,
+        RUN_MODE_REAL = 1
     };
 
     struct DungeonTemplate
@@ -106,11 +118,65 @@ namespace PlayerbotDungeonSim
         bool FromInstanceStart = false;
     };
 
+    struct ProgressiveTravelStep
+    {
+        uint32 GuidLow = 0;
+        uint32 AccountId = 0;
+        std::string Name;
+        std::string DungeonName;
+        uint32 Map = 0;
+        float X = 0.0f;
+        float Y = 0.0f;
+        float Z = 0.0f;
+        float O = 0.0f;
+        uint32 ExecuteAt = 0;
+        uint8 Step = 0;
+        uint8 Total = 0;
+    };
+
+    struct NativeEventQueueStep
+    {
+        uint64 RunId = 0;
+        uint32 DungeonId = 0;
+        uint32 GuidLow = 0;
+        uint32 AccountId = 0;
+        std::string Name;
+        std::string DungeonName;
+        uint32 StepOrder = 0;
+        std::string StepType;
+        uint32 Map = 0;
+        float X = 0.0f;
+        float Y = 0.0f;
+        float Z = 0.0f;
+        float O = 0.0f;
+        uint32 ExecuteAt = 0;
+        uint8 RetryCount = 0;
+        std::string Label;
+    };
+
+    struct NativeFollowerLeashStep
+    {
+        uint64 RunId = 0;
+        uint32 LeaderGuidLow = 0;
+        uint32 LeaderAccountId = 0;
+        std::string LeaderName;
+        std::vector<BotCandidate> Members;
+        uint32 ExecuteAt = 0;
+        uint32 Sequence = 0;
+        uint8 RetryCount = 0;
+    };
+
     static bool Enable;
     static bool Debug;
+    static bool AuditFileLog;
+    static std::string AuditFilePath;
+    static bool AuditFileMovement;
+    static bool AuditFileLoot;
+    static bool AuditFileMembers;
     static uint32 TickSeconds;
     static uint8 MinBotLevel;
     static uint32 MaxGroupsPerTick;
+    static RunExecutionMode ConfiguredRunMode;
     static bool PreferGuildGroups;
     static bool AllowPugs;
     static bool RequireFullGroup;
@@ -118,10 +184,27 @@ namespace PlayerbotDungeonSim
     static uint32 MaxDurationMinutes;
     static bool RealRunFirst;
     static bool SimFallback;
+    static bool HybridSimReal;
+    static uint32 HybridRealChance;
+    static bool HybridRealFallbackToSim;
+    static uint32 SimMinimumBossKillsForLoot;
+    static bool SimMinimumBossKillsApplyToRaids;
     static bool TeleportOnlineMembers;
     static bool CreateRealGroups;
     static bool TeleportOnlyIfOnline;
     static bool TeleportInsideInstance;
+    static bool ProgressiveTeleport;
+    static uint32 ProgressiveTeleportStepSeconds;
+    static bool InstanceWaypointTeleport;
+    static uint32 InstanceWaypointStepSeconds;
+    static bool NativeEventSteps;
+    static uint32 NativeEventStepSeconds;
+    static bool NativeEventMoveInsteadTeleport;
+    static bool NativeEventLeaderOnly;
+    static bool NativeFollowerLeash;
+    static uint32 NativeFollowerLeashSeconds;
+    static float NativeFollowerLeashDistance;
+    static float NativeFollowerHardTeleportDistance;
     static uint32 MinOnlineMembersForLiveRun;
     static bool RequireOnlineBotsForRun;
     static bool CleanupOfflineRunsWhenLiveOnly;
@@ -137,6 +220,14 @@ namespace PlayerbotDungeonSim
     static bool EquipUsableLootOnline;
     static bool DeliverPendingLootOnLogin;
     static uint32 MaxPendingDeliveriesPerLogin;
+    static bool AwardXp;
+    static bool GiveXpToOnlinePlayers;
+    static bool DeliverPendingXpOnLogin;
+    static bool XpScaleByBossKills;
+    static uint32 XpPercentOfLevel;
+    static uint32 XpMinimumPercentOnAnyKill;
+    static uint32 XpLevelCap;
+    static uint32 MaxPendingXpDeliveriesPerLogin;
     static bool EquipUpgradesOnDelivery;
     static bool OnlyEquipBetterItems;
     static bool InviteRealPlayers;
@@ -178,11 +269,22 @@ namespace PlayerbotDungeonSim
     static bool OrganicLfgActing;
     static uint32 OrganicLfgChance;
     static bool RestrictOrganicCitiesToClassic;
+    static bool StructuredLfgSimulation;
+    static uint32 StructuredLfgChance;
+    static uint32 StructuredLfgTradeChance;
+    static bool AutoUseGmGroupSelection;
+    static uint32 ReserveRealPlayerSlotChance;
+    static bool PlayerWhisperJoin;
+    static bool PlayerWhisperJoinRequiresRole;
+    static bool PlayerWhisperJoinAllowGm;
     static bool TradeChatSimulation;
     static uint32 TradeChatChance;
     static uint32 TradeChatEveryTicks;
     static uint32 _tradeTickCounter = 0;
     static std::map<std::string, std::vector<BotCandidate>> _gmStagedGroups;
+    static std::vector<ProgressiveTravelStep> _progressiveTravelQueue;
+    static std::vector<NativeEventQueueStep> _nativeEventQueue;
+    static std::vector<NativeFollowerLeashStep> _nativeFollowerLeashQueue;
 
     static uint32 _timerMs = 0;
     static uint32 _statusTimerMs = 0;
@@ -191,15 +293,52 @@ namespace PlayerbotDungeonSim
 
     static uint32 GetRunGuildId(std::vector<BotCandidate> const& group);
 
+    static std::string AuditTimestamp()
+    {
+        std::time_t now = std::time(nullptr);
+        std::tm localTime;
+#ifdef _WIN32
+        localtime_s(&localTime, &now);
+#else
+        localtime_r(&now, &localTime);
+#endif
+
+        std::ostringstream ss;
+        ss << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S");
+        return ss.str();
+    }
+
+    static void AuditFileWrite(std::string const& category, std::string const& msg)
+    {
+        if (!AuditFileLog)
+            return;
+
+        std::string path = AuditFilePath.empty() ? "Logs/playerbot_dungeon_sim.log" : AuditFilePath;
+        std::ofstream out(path, std::ios::app);
+        if (!out.is_open())
+            return;
+
+        out << "[" << AuditTimestamp() << "] [" << category << "] " << msg << '\n';
+    }
+
+    static void AuditLog(std::string const& category, std::string const& msg)
+    {
+        AuditFileWrite(category, msg);
+    }
+
     static void DebugLog(std::string const& msg)
     {
         if (Debug)
+        {
             LOG_INFO("module", "[PlayerbotDungeonSim] {}", msg);
+            AuditFileWrite("DEBUG", msg);
+        }
     }
 
     static void StatusLog(std::string const& msg)
     {
         LOG_INFO("module", "[PlayerbotDungeonSim] {}", msg);
+        AuditFileWrite("INFO", msg);
     }
 
 
@@ -219,11 +358,14 @@ namespace PlayerbotDungeonSim
             { "characters", "playerbot_dungeon_run_member", true },
             { "characters", "playerbot_dungeon_run_boss", true },
             { "characters", "playerbot_dungeon_loot_award", true },
+            { "characters", "playerbot_dungeon_xp_award", true },
             { "characters", "playerbot_dungeon_player_invite", true },
             { "characters", "playerbot_dungeon_raid_progress", true },
             { "characters", "playerbot_dungeon_lockout", true },
             { "world", "playerbot_dungeon_template", false },
-            { "world", "playerbot_dungeon_boss_template", false }
+            { "world", "playerbot_dungeon_boss_template", false },
+            { "world", "playerbot_dungeon_waypoint", false },
+            { "world", "playerbot_dungeon_event_step", false }
         };
 
         bool ok = true;
@@ -256,6 +398,124 @@ namespace PlayerbotDungeonSim
         if (QueryResult result = WorldDatabase.Query("SELECT name FROM playerbot_dungeon_template WHERE id = {} LIMIT 1", dungeonTemplateId))
             return result->Fetch()[0].Get<std::string>();
         return "DungeonTemplate#" + std::to_string(dungeonTemplateId);
+    }
+
+    static std::string ToLowerCopy(std::string value);
+    static std::string LowerCopy(std::string msg);
+    static std::string TrimCopy(std::string value);
+    static RunExecutionMode ParseRunModeToken(std::string const& raw, RunExecutionMode fallback, bool* matched = nullptr);
+    static std::string RunModeText(RunExecutionMode mode);
+
+    static std::string NormalizeToken(std::string value)
+    {
+        value = ToLowerCopy(value);
+        value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char c)
+        {
+            return std::isspace(c) || c == '-' || c == '_' || c == '\'' || c == '`' || c == '.';
+        }), value.end());
+        return value;
+    }
+
+
+    static RunExecutionMode ParseRunModeToken(std::string const& raw, RunExecutionMode fallback, bool* matched)
+    {
+        std::string key = NormalizeToken(raw);
+        bool ok = true;
+        RunExecutionMode mode = fallback;
+
+        if (key == "sim" || key == "simulation" || key == "simulated" || key == "timed" || key == "fake" || key == "offline")
+            mode = RUN_MODE_SIM;
+        else if (key == "real" || key == "live" || key == "native" || key == "walk" || key == "clear")
+            mode = RUN_MODE_REAL;
+        else
+            ok = false;
+
+        if (matched)
+            *matched = ok;
+        return ok ? mode : fallback;
+    }
+
+    static std::string RunModeText(RunExecutionMode mode)
+    {
+        return mode == RUN_MODE_REAL ? "REAL" : "SIM";
+    }
+
+    static std::string ResolveDungeonAlias(std::string const& rawName)
+    {
+        std::string key = NormalizeToken(rawName);
+
+        if (key == "rfc" || key == "ragefire") return "Ragefire Chasm";
+        if (key == "wc" || key == "wailing") return "Wailing Caverns";
+        if (key == "dm" || key == "vc" || key == "deadmines" || key == "thedeadmines" || key == "deadmine") return "Deadmines";
+        if (key == "sfk") return "Shadowfang Keep";
+        if (key == "bfd") return "Blackfathom Deeps";
+        if (key == "stocks" || key == "stockade" || key == "stockades" || key == "thestockade" || key == "thestockades" || key == "stk") return "The Stockade";
+        if (key == "gnomer" || key == "gnomeregan" || key == "gno") return "Gnomeregan";
+        if (key == "rfk") return "Razorfen Kraul";
+        if (key == "rfd") return "Razorfen Downs";
+        if (key == "smgy" || key == "smgraveyard" || key == "graveyard") return "Scarlet Monastery Graveyard";
+        if (key == "smlib" || key == "smlibrary" || key == "library") return "Scarlet Monastery Library";
+        if (key == "smarm" || key == "smarmory" || key == "armory") return "Scarlet Monastery Armory";
+        if (key == "smcath" || key == "smcathedral" || key == "cathedral") return "Scarlet Monastery Cathedral";
+        if (key == "zf") return "Zul'Farrak";
+        if (key == "mara" || key == "maraudon") return "Maraudon";
+        if (key == "st" || key == "sunken" || key == "sunkentemple") return "Sunken Temple";
+        if (key == "brd") return "Blackrock Depths";
+        if (key == "lbrs") return "Lower Blackrock Spire";
+        if (key == "ubrs") return "Upper Blackrock Spire";
+        if (key == "dme" || key == "diremauleast") return "Dire Maul East";
+        if (key == "dmw" || key == "diremaulwest") return "Dire Maul West";
+        if (key == "dmn" || key == "dmt" || key == "diremaulnorth") return "Dire Maul North";
+        if (key == "scholo" || key == "scholomance") return "Scholomance";
+        if (key == "strat" || key == "strath" || key == "stratholme") return "Stratholme";
+        if (key == "mc") return "Molten Core";
+        if (key == "ony" || key == "onyxia") return "Onyxia's Lair";
+        if (key == "bwl") return "Blackwing Lair";
+        if (key == "zg") return "Zul'Gurub";
+        if (key == "aq20" || key == "raq") return "Ruins of Ahn'Qiraj";
+        if (key == "aq40" || key == "taq") return "Temple of Ahn'Qiraj";
+        if (key == "naxx" || key == "naxx40") return "Naxxramas 40";
+
+        return rawName;
+    }
+
+    static uint8 DungeonFactionWeight(DungeonTemplate const& dungeon, uint8 team)
+    {
+        switch (dungeon.Id)
+        {
+            case 1:  // RFC, inside Orgrimmar
+                return team == TEAM_HORDE ? 100 : 0;
+            case 2:  // WC, Barrens
+                return team == TEAM_HORDE ? 90 : 10;
+            case 3:  // Deadmines, Westfall
+                return team == TEAM_ALLIANCE ? 90 : 10;
+            case 4:  // SFK, Silverpine
+                return team == TEAM_HORDE ? 90 : 10;
+            case 6:  // Stockades, Stormwind
+                return team == TEAM_ALLIANCE ? 100 : 0;
+            case 7:  // Gnomeregan
+                return team == TEAM_ALLIANCE ? 85 : 15;
+            case 8:  // RFK
+            case 13: // RFD
+                return team == TEAM_HORDE ? 70 : 30;
+            case 9:
+            case 10:
+            case 11:
+            case 12:
+                return team == TEAM_HORDE ? 55 : 45;
+            default:
+                return 100;
+        }
+    }
+
+    static bool IsDungeonFactionAllowedForTeam(DungeonTemplate const& dungeon, uint8 team, bool useWeightedRoll)
+    {
+        uint8 weight = DungeonFactionWeight(dungeon, team);
+        if (weight == 0)
+            return false;
+        if (!useWeightedRoll || weight >= 100)
+            return true;
+        return urand(1, 100) <= weight;
     }
 
     static uint8 GetEffectiveServerLevelCap()
@@ -429,7 +689,7 @@ namespace PlayerbotDungeonSim
             d.Z = f[12].Get<float>();
             d.O = f[13].Get<float>();
 
-            if (IsDungeonAllowed(d.MapId) && IsRaidAllowedByServerCap(d))
+            if (IsDungeonAllowed(d.MapId) && IsRaidAllowedByServerCap(d) && IsDungeonFactionAllowedForTeam(d, team, true))
                 out.push_back(d);
         } while (result->NextRow());
 
@@ -462,11 +722,16 @@ namespace PlayerbotDungeonSim
         if (!result)
             return out;
 
+        std::unordered_set<uint32> seen;
         do
         {
             Field* f = result->Fetch();
+            uint32 guidLow = f[0].Get<uint32>();
+            if (!seen.insert(guidLow).second)
+                continue;
+
             BotCandidate b;
-            b.GuidLow = f[0].Get<uint32>();
+            b.GuidLow = guidLow;
             b.Name = f[1].Get<std::string>();
             b.Level = f[2].Get<uint8>();
             b.Race = f[3].Get<uint8>();
@@ -604,6 +869,10 @@ namespace PlayerbotDungeonSim
 
         std::sort(candidates.begin(), candidates.end(), [](BotCandidate const& a, BotCandidate const& b)
         {
+            // If we are allowed to move/teleport online bots, prefer characters that are actually online.
+            // This keeps SIM runs visible in /who and lets the same group also receive direct gear.
+            if (AllowOnlineCharacterTouch && TeleportOnlineMembers && PreferOnlineCandidatesForLiveRuns && a.DbOnline != b.DbOnline)
+                return a.DbOnline > b.DbOnline;
             if (a.GuildId != b.GuildId)
                 return a.GuildId > b.GuildId;
             return a.Level > b.Level;
@@ -828,6 +1097,146 @@ namespace PlayerbotDungeonSim
         }
     }
 
+
+    static std::string DungeonShortCode(DungeonTemplate const& dungeon)
+    {
+        std::string key = NormalizeToken(dungeon.Name);
+        if (key == "ragefirechasm") return "RFC";
+        if (key == "wailingcaverns") return "WC";
+        if (key == "deadmines") return "DM";
+        if (key == "shadowfangkeep") return "SFK";
+        if (key == "blackfathomdeeps") return "BFD";
+        if (key == "thestockade" || key == "thestockades") return "Stocks";
+        if (key == "gnomeregan") return "Gnomer";
+        if (key == "razorfenkraul") return "RFK";
+        if (key == "razorfendowns") return "RFD";
+        if (key == "scarletmonasterygraveyard") return "SMGY";
+        if (key == "scarletmonasterylibrary") return "SMLib";
+        if (key == "scarletmonasteryarmory") return "SMArm";
+        if (key == "scarletmonasterycathedral") return "SMCath";
+        if (key == "zulfarrak") return "ZF";
+        if (key == "maraudon") return "Mara";
+        if (key == "sunkentemple") return "ST";
+        if (key == "blackrockdepths") return "BRD";
+        if (key == "lowerblackrockspire") return "LBRS";
+        if (key == "upperblackrockspire") return "UBRS";
+        if (key == "diremauleast") return "DME";
+        if (key == "diremaulwest") return "DMW";
+        if (key == "diremaulnorth") return "DMN";
+        if (key == "scholomance") return "Scholo";
+        if (key == "stratholme") return "Strat";
+        if (key == "moltencore") return "MC";
+        if (key == "onyxiaslair") return "Ony";
+        if (key == "blackwinglair") return "BWL";
+        if (key == "zulgurub") return "ZG";
+        if (key == "ruinsofahrqiraj") return "AQ20";
+        if (key == "templeofahnqiraj") return "AQ40";
+        if (key == "naxxramas40") return "Naxx";
+        return dungeon.Name;
+    }
+
+    static std::string NeededRolesText(std::vector<BotCandidate> const& group, DungeonTemplate const& dungeon)
+    {
+        uint32 tanks = 0, heals = 0, dps = 0;
+        for (BotCandidate const& b : group)
+        {
+            if (b.PreferredRole == ROLE_TANK) ++tanks;
+            else if (b.PreferredRole == ROLE_HEALER) ++heals;
+            else ++dps;
+        }
+
+        std::vector<std::string> parts;
+        if (tanks < 1) parts.push_back("tank");
+        if (heals < 1) parts.push_back("heals");
+        uint32 targetDps = dungeon.GroupSize >= 5 ? dungeon.GroupSize - 2 : 1;
+        if (dps < targetDps)
+            parts.push_back(std::to_string(targetDps - dps) + " dps");
+
+        if (parts.empty())
+            return "last spot / backup";
+
+        std::string out;
+        for (size_t i = 0; i < parts.size(); ++i)
+        {
+            if (i) out += "/";
+            out += parts[i];
+        }
+        return out;
+    }
+
+    static void MaybeReservePlayerSlot(std::vector<BotCandidate>& group, DungeonTemplate const& dungeon)
+    {
+        if (!InviteRealPlayers || ReserveRealPlayerSlotChance == 0 || group.size() < dungeon.GroupSize)
+            return;
+
+        if (urand(1, 100) > ReserveRealPlayerSlotChance)
+            return;
+
+        // Prefer reserving a DPS slot, not the only tank/healer.
+        for (auto itr = group.rbegin(); itr != group.rend(); ++itr)
+        {
+            if (itr->PreferredRole == ROLE_DPS)
+            {
+                StatusLog("[LFGSim] " + itr->Name + " is holding off so a real player can fill a " + dungeon.Name + " slot.");
+                group.erase(std::next(itr).base());
+                return;
+            }
+        }
+    }
+
+    static void SendStructuredLfgSimulation(std::vector<BotCandidate> const& group, DungeonTemplate const& dungeon)
+    {
+        if (!StructuredLfgSimulation || group.empty())
+            return;
+
+        if (urand(1, 100) > StructuredLfgChance)
+            return;
+
+        BotCandidate const& leader = group.front();
+        std::string code = DungeonShortCode(dungeon);
+        std::string city = ClassicCapitalCityName(leader.Team);
+        std::string need = NeededRolesText(group, dungeon);
+
+        // Leader acts like the organizer. Members act like they are responding to the ad.
+        SendAmbientChatMessage("GeneralSim:" + city, leader.Name, "LFM " + code + " need " + need + " pst role");
+
+        if (TradeChatSimulation && urand(1, 100) <= StructuredLfgTradeChance)
+            SendAmbientChatMessage("TradeSim:" + city, leader.Name, "LFM " + code + " - " + TeamName(leader.Team) + " group forming, whisper role");
+
+        uint32 maxLines = std::min<uint32>(uint32(group.size()), 5);
+        for (uint32 i = 0; i < maxLines; ++i)
+        {
+            BotCandidate const& b = group[i];
+            std::string spec = ClassSpecText(b.Class, b.PreferredRole);
+            std::string msg;
+
+            if (i == 0)
+            {
+                msg = "inviting for " + code + ", say tank/heals/dps";
+            }
+            else if (b.PreferredRole == ROLE_TANK)
+            {
+                msg = urand(0, 1) ? "LFG " + code + " tank" : "I can tank " + code + " - " + spec;
+            }
+            else if (b.PreferredRole == ROLE_HEALER)
+            {
+                msg = urand(0, 1) ? "LFG " + code + " heals" : spec + " LFG " + code;
+            }
+            else
+            {
+                msg = urand(0, 1) ? "LFG " + code + " dps" : spec + " dps for " + code;
+            }
+
+            SendAmbientChatMessage("GeneralSim:" + city, b.Name, msg);
+        }
+
+        if (LocalZoneChatSimulation && urand(1, 100) <= LocalZoneChatChance)
+        {
+            BotCandidate const& b = group[urand(0, uint32(group.size() - 1))];
+            SendAmbientChatMessage("LocalSim:" + dungeon.Name, b.Name, "LFG/LFM " + code + " at zone, pst role");
+        }
+    }
+
     static void SendOrganicLfgActing(std::vector<BotCandidate> const& group, DungeonTemplate const& dungeon)
     {
         if (!OrganicLfgActing || group.empty())
@@ -965,6 +1374,101 @@ namespace PlayerbotDungeonSim
         return loc;
     }
 
+    static TeleportLocation MakeTeleportLocation(uint32 map, float x, float y, float z, float o, bool instanceStart = false)
+    {
+        TeleportLocation loc;
+        loc.Map = map;
+        loc.X = x;
+        loc.Y = y;
+        loc.Z = z;
+        loc.O = o;
+        loc.FromInstanceStart = instanceStart;
+        return loc;
+    }
+
+    static std::vector<TeleportLocation> BuildProgressiveRoute(uint8 team, DungeonTemplate const& dungeon, TeleportLocation const& finalLoc)
+    {
+        std::vector<TeleportLocation> route;
+
+        if (team == TEAM_ALLIANCE)
+        {
+            route.push_back(MakeTeleportLocation(0, -8833.38f, 628.62f, 94.00f, 0.50f)); // Stormwind
+
+            if (dungeon.Id == 3) // Deadmines: SW -> Goldshire -> Westfall -> portal -> instance
+            {
+                route.push_back(MakeTeleportLocation(0, -9464.00f, 64.00f, 56.00f, 3.00f));
+                route.push_back(MakeTeleportLocation(0, -10508.00f, 1047.00f, 60.50f, 1.60f));
+                route.push_back(MakeTeleportLocation(dungeon.EntranceMap, dungeon.X, dungeon.Y, dungeon.Z, dungeon.O));
+            }
+            else if (dungeon.Id == 6) // Stockades
+            {
+                route.push_back(MakeTeleportLocation(dungeon.EntranceMap, dungeon.X, dungeon.Y, dungeon.Z, dungeon.O));
+            }
+            else
+            {
+                route.push_back(MakeTeleportLocation(dungeon.EntranceMap, dungeon.X, dungeon.Y, dungeon.Z, dungeon.O));
+            }
+        }
+        else
+        {
+            route.push_back(MakeTeleportLocation(1, 1665.00f, -4343.00f, 61.00f, 3.20f)); // Orgrimmar
+
+            if (dungeon.Id == 1) // RFC
+            {
+                route.push_back(MakeTeleportLocation(dungeon.EntranceMap, dungeon.X, dungeon.Y, dungeon.Z, dungeon.O));
+            }
+            else if (dungeon.Id == 2) // WC: Orgrimmar -> Crossroads-ish -> cave -> instance
+            {
+                route.push_back(MakeTeleportLocation(1, -456.00f, -2652.00f, 95.00f, 1.20f));
+                route.push_back(MakeTeleportLocation(dungeon.EntranceMap, dungeon.X, dungeon.Y, dungeon.Z, dungeon.O));
+            }
+            else if (dungeon.Id == 4) // SFK: UC/Silverpine flavor via outside coords
+            {
+                route.push_back(MakeTeleportLocation(0, 1586.00f, 239.00f, -52.00f, 0.00f));
+                route.push_back(MakeTeleportLocation(dungeon.EntranceMap, dungeon.X, dungeon.Y, dungeon.Z, dungeon.O));
+            }
+            else
+            {
+                route.push_back(MakeTeleportLocation(dungeon.EntranceMap, dungeon.X, dungeon.Y, dungeon.Z, dungeon.O));
+            }
+        }
+
+        if (finalLoc.FromInstanceStart || finalLoc.Map != dungeon.EntranceMap)
+            route.push_back(finalLoc);
+
+        if (route.empty())
+            route.push_back(finalLoc);
+
+        return route;
+    }
+
+
+    static std::vector<TeleportLocation> LoadInstanceWaypointRoute(DungeonTemplate const& dungeon)
+    {
+        std::vector<TeleportLocation> route;
+
+        if (!InstanceWaypointTeleport)
+            return route;
+
+        QueryResult result = WorldDatabase.Query(
+            "SELECT map_id, position_x, position_y, position_z, orientation "
+            "FROM playerbot_dungeon_waypoint "
+            "WHERE dungeon_template_id = {} AND enabled = 1 "
+            "ORDER BY step_order ASC",
+            dungeon.Id);
+
+        if (!result)
+            return route;
+
+        do
+        {
+            Field* f = result->Fetch();
+            route.push_back(MakeTeleportLocation(f[0].Get<uint32>(), f[1].Get<float>(), f[2].Get<float>(), f[3].Get<float>(), f[4].Get<float>(), true));
+        } while (result->NextRow());
+
+        return route;
+    }
+
     static bool IsPlayerSafeToMove(Player* player);
     static bool IsBotCandidateSafeToMove(Player* player, BotCandidate const& bot);
 
@@ -1059,12 +1563,365 @@ namespace PlayerbotDungeonSim
         return true;
     }
 
+    static void ProcessProgressiveTeleportQueue()
+    {
+        if (_progressiveTravelQueue.empty())
+            return;
+
+        uint32 now = GameTime::GetGameTime().count();
+        std::vector<ProgressiveTravelStep> keep;
+        keep.reserve(_progressiveTravelQueue.size());
+
+        for (ProgressiveTravelStep const& step : _progressiveTravelQueue)
+        {
+            if (step.ExecuteAt > now)
+            {
+                keep.push_back(step);
+                continue;
+            }
+
+            BotCandidate bot;
+            bot.GuidLow = step.GuidLow;
+            bot.AccountId = step.AccountId;
+
+            Player* player = FindOnlinePlayer(step.GuidLow);
+            if (!IsBotCandidateSafeToMove(player, bot))
+            {
+                DebugLog("Journey step skipped for " + step.Name + ": bot no longer online/movable.");
+                continue;
+            }
+
+            if (player->IsInCombat())
+                player->CombatStop(true);
+
+            player->TeleportTo(step.Map, step.X, step.Y, step.Z, step.O);
+            StatusLog("[JourneySim] " + step.Name + " -> " + step.DungeonName + " step " + std::to_string(uint32(step.Step)) + "/" + std::to_string(uint32(step.Total)));
+            if (AuditFileMovement)
+                AuditLog("MOVE", "JourneySim " + step.Name + " -> " + step.DungeonName + " step=" + std::to_string(uint32(step.Step)) + "/" + std::to_string(uint32(step.Total)) +
+                    " map=" + std::to_string(step.Map) + " x=" + std::to_string(step.X) + " y=" + std::to_string(step.Y) + " z=" + std::to_string(step.Z));
+        }
+
+        _progressiveTravelQueue.swap(keep);
+    }
+
+    static std::string NormalizeNativeStepType(std::string value)
+    {
+        value = LowerCopy(TrimCopy(value));
+        if (value == "tp")
+            return "teleport";
+        if (value == "walk")
+            return "move";
+        if (value == "pause")
+            return "wait";
+        if (value == "say" || value == "note" || value == "checkpoint")
+            return "log";
+        if (value != "move" && value != "teleport" && value != "wait" && value != "log" && value != "pull" && value != "anchor")
+            return "move";
+        return value;
+    }
+
+    static void ProcessNativeEventQueue()
+    {
+        if (_nativeEventQueue.empty())
+            return;
+
+        uint32 now = GameTime::GetGameTime().count();
+        std::vector<NativeEventQueueStep> keep;
+        keep.reserve(_nativeEventQueue.size());
+
+        for (NativeEventQueueStep const& step : _nativeEventQueue)
+        {
+            if (step.ExecuteAt > now)
+            {
+                keep.push_back(step);
+                continue;
+            }
+
+            BotCandidate bot;
+            bot.GuidLow = step.GuidLow;
+            bot.AccountId = step.AccountId;
+
+            Player* player = FindOnlinePlayer(step.GuidLow);
+            if (!IsBotCandidateSafeToMove(player, bot))
+            {
+                NativeEventQueueStep retry = step;
+                if (retry.RetryCount < 6)
+                {
+                    ++retry.RetryCount;
+                    retry.ExecuteAt = now + 2;
+                    keep.push_back(retry);
+                    DebugLog("Native step delayed for " + step.Name + ": bot not ready/teleporting yet, retry " + std::to_string(uint32(retry.RetryCount)) + ".");
+                }
+                else
+                    DebugLog("Native step skipped for " + step.Name + ": bot no longer online/movable after retries.");
+                continue;
+            }
+
+            if (player->IsInCombat())
+                player->CombatStop(true);
+
+            std::string type = NormalizeNativeStepType(step.StepType);
+
+            if (type == "wait" || type == "log")
+            {
+                StatusLog("[NativeClear] run #" + std::to_string(step.RunId) + " " + step.Name + " " + step.DungeonName +
+                    " step " + std::to_string(step.StepOrder) + " " + type + " '" + step.Label + "'");
+                continue;
+            }
+
+            // anchor/pull are movement anchors. For now they route the bot to the recorded spot and let Playerbots engage nearby mobs.
+            bool useTeleport = (type == "teleport") || !NativeEventMoveInsteadTeleport;
+            if (useTeleport)
+            {
+                player->TeleportTo(step.Map, step.X, step.Y, step.Z, step.O);
+                StatusLog("[NativeClear] run #" + std::to_string(step.RunId) + " TP " + step.Name + " -> " + step.DungeonName +
+                    " step " + std::to_string(step.StepOrder) + " '" + step.Label + "'");
+                if (AuditFileMovement)
+                    AuditLog("MOVE", "run #" + std::to_string(step.RunId) + " TP " + step.Name + " -> " + step.DungeonName +
+                        " step=" + std::to_string(step.StepOrder) + " label='" + step.Label + "' map=" + std::to_string(step.Map) +
+                        " x=" + std::to_string(step.X) + " y=" + std::to_string(step.Y) + " z=" + std::to_string(step.Z));
+            }
+            else
+            {
+                player->GetMotionMaster()->MovePoint(step.StepOrder, step.X, step.Y, step.Z);
+                StatusLog("[NativeClear] run #" + std::to_string(step.RunId) + " MOVE " + step.Name + " -> " + step.DungeonName +
+                    " step " + std::to_string(step.StepOrder) + " '" + step.Label + "'");
+                if (AuditFileMovement)
+                    AuditLog("MOVE", "run #" + std::to_string(step.RunId) + " MOVE " + step.Name + " -> " + step.DungeonName +
+                        " step=" + std::to_string(step.StepOrder) + " label='" + step.Label + "' map=" + std::to_string(step.Map) +
+                        " x=" + std::to_string(step.X) + " y=" + std::to_string(step.Y) + " z=" + std::to_string(step.Z));
+            }
+        }
+
+        _nativeEventQueue.swap(keep);
+    }
+
+    static float DistanceSq3d(Player const* a, Player const* b)
+    {
+        if (!a || !b)
+            return 999999999.0f;
+
+        float dx = a->GetPositionX() - b->GetPositionX();
+        float dy = a->GetPositionY() - b->GetPositionY();
+        float dz = a->GetPositionZ() - b->GetPositionZ();
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    static BotCandidate SelectNativeLeader(std::vector<BotCandidate> const& group)
+    {
+        for (BotCandidate const& b : group)
+        {
+            if (b.PreferredRole != ROLE_TANK)
+                continue;
+
+            Player* player = FindOnlinePlayer(b.GuidLow);
+            if (IsBotCandidateSafeToMove(player, b))
+                return b;
+        }
+
+        for (BotCandidate const& b : group)
+        {
+            Player* player = FindOnlinePlayer(b.GuidLow);
+            if (IsBotCandidateSafeToMove(player, b))
+                return b;
+        }
+
+        return group.empty() ? BotCandidate() : group.front();
+    }
+
+    static void ScheduleNativeFollowerLeash(uint64 runId, std::vector<BotCandidate> const& group, BotCandidate const& leader, uint32 totalSeconds)
+    {
+        if (!NativeFollowerLeash || group.size() < 2 || !leader.GuidLow)
+            return;
+
+        uint32 now = GameTime::GetGameTime().count();
+        uint32 interval = std::max<uint32>(1, NativeFollowerLeashSeconds);
+        uint32 total = std::max<uint32>(interval, totalSeconds + interval);
+        uint32 queued = 0;
+
+        for (uint32 t = interval; t <= total; t += interval)
+        {
+            NativeFollowerLeashStep step;
+            step.RunId = runId;
+            step.LeaderGuidLow = leader.GuidLow;
+            step.LeaderAccountId = leader.AccountId;
+            step.LeaderName = leader.Name;
+            step.Members = group;
+            step.ExecuteAt = now + t;
+            step.Sequence = ++queued;
+            _nativeFollowerLeashQueue.push_back(step);
+        }
+
+        if (queued)
+            DebugLog("[NativeClear] queued " + std::to_string(queued) + " follower leash checks for run #" + std::to_string(runId) + ".");
+    }
+
+    static void ProcessNativeFollowerLeashQueue()
+    {
+        if (_nativeFollowerLeashQueue.empty())
+            return;
+
+        uint32 now = GameTime::GetGameTime().count();
+        std::vector<NativeFollowerLeashStep> keep;
+        keep.reserve(_nativeFollowerLeashQueue.size());
+
+        for (NativeFollowerLeashStep const& step : _nativeFollowerLeashQueue)
+        {
+            if (step.ExecuteAt > now)
+            {
+                keep.push_back(step);
+                continue;
+            }
+
+            BotCandidate leaderBot;
+            leaderBot.GuidLow = step.LeaderGuidLow;
+            leaderBot.AccountId = step.LeaderAccountId;
+
+            Player* leader = FindOnlinePlayer(step.LeaderGuidLow);
+            if (!IsBotCandidateSafeToMove(leader, leaderBot))
+            {
+                NativeFollowerLeashStep retry = step;
+                if (retry.RetryCount < 6)
+                {
+                    ++retry.RetryCount;
+                    retry.ExecuteAt = now + 2;
+                    keep.push_back(retry);
+                    DebugLog("[NativeClear] follower leash delayed for run #" + std::to_string(step.RunId) + ": leader not ready/teleporting yet, retry " + std::to_string(uint32(retry.RetryCount)) + ".");
+                }
+                else
+                    DebugLog("[NativeClear] follower leash skipped for run #" + std::to_string(step.RunId) + ": leader not online/movable after retries.");
+                continue;
+            }
+
+            float softSq = NativeFollowerLeashDistance * NativeFollowerLeashDistance;
+            float hardSq = NativeFollowerHardTeleportDistance * NativeFollowerHardTeleportDistance;
+
+            for (BotCandidate const& b : step.Members)
+            {
+                if (b.GuidLow == step.LeaderGuidLow)
+                    continue;
+
+                Player* follower = FindOnlinePlayer(b.GuidLow);
+                if (!IsBotCandidateSafeToMove(follower, b))
+                    continue;
+
+                if (follower->IsInCombat())
+                    continue;
+
+                if (follower->GetMapId() != leader->GetMapId())
+                {
+                    follower->TeleportTo(leader->GetMapId(), leader->GetPositionX(), leader->GetPositionY(), leader->GetPositionZ(), leader->GetOrientation());
+                    DebugLog("[NativeClear] follower leash TP " + b.Name + " to leader " + step.LeaderName + " for run #" + std::to_string(step.RunId) + ".");
+                    if (AuditFileMovement)
+                        AuditLog("LEASH", "run #" + std::to_string(step.RunId) + " TP " + b.Name + " to leader " + step.LeaderName);
+                    continue;
+                }
+
+                float distSq = DistanceSq3d(follower, leader);
+                if (NativeFollowerHardTeleportDistance > 0.0f && distSq > hardSq)
+                {
+                    follower->TeleportTo(leader->GetMapId(), leader->GetPositionX(), leader->GetPositionY(), leader->GetPositionZ(), leader->GetOrientation());
+                    DebugLog("[NativeClear] follower hard-leash TP " + b.Name + " to leader " + step.LeaderName + " for run #" + std::to_string(step.RunId) + ".");
+                    if (AuditFileMovement)
+                        AuditLog("LEASH", "run #" + std::to_string(step.RunId) + " HARD_TP " + b.Name + " to leader " + step.LeaderName);
+                    continue;
+                }
+
+                if (distSq > softSq)
+                {
+                    follower->GetMotionMaster()->MovePoint(uint32(700000 + (step.Sequence % 10000)), leader->GetPositionX(), leader->GetPositionY(), leader->GetPositionZ());
+                    DebugLog("[NativeClear] follower move-leash " + b.Name + " toward leader " + step.LeaderName + " for run #" + std::to_string(step.RunId) + ".");
+                    if (AuditFileMovement)
+                        AuditLog("LEASH", "run #" + std::to_string(step.RunId) + " MOVE " + b.Name + " toward leader " + step.LeaderName);
+                }
+            }
+        }
+
+        _nativeFollowerLeashQueue.swap(keep);
+    }
+
+    static void ScheduleNativeEventSteps(uint64 runId, DungeonTemplate const& dungeon, std::vector<BotCandidate> const& group)
+    {
+        if (!NativeEventSteps || group.empty())
+            return;
+
+        QueryResult result = WorldDatabase.Query(
+            "SELECT step_order, step_type, map_id, position_x, position_y, position_z, orientation, wait_seconds, label "
+            "FROM playerbot_dungeon_event_step "
+            "WHERE dungeon_template_id = {} AND enabled = 1 "
+            "ORDER BY step_order ASC",
+            dungeon.Id);
+
+        if (!result)
+            return;
+
+        uint32 now = GameTime::GetGameTime().count();
+        uint32 cumulativeDelay = std::max<uint32>(1, NativeEventStepSeconds);
+        uint32 scheduled = 0;
+        BotCandidate leader = SelectNativeLeader(group);
+        if (NativeEventLeaderOnly && leader.GuidLow)
+            StatusLog("[NativeClear] run #" + std::to_string(runId) + " leader/tank driver is " + leader.Name + " for " + dungeon.Name + ".");
+
+        do
+        {
+            Field* f = result->Fetch();
+            uint32 order = f[0].Get<uint32>();
+            std::string type = NormalizeNativeStepType(f[1].Get<std::string>());
+            uint32 map = f[2].Get<uint32>();
+            float x = f[3].Get<float>();
+            float y = f[4].Get<float>();
+            float z = f[5].Get<float>();
+            float o = f[6].Get<float>();
+            uint32 wait = f[7].Get<uint32>();
+            std::string label = f[8].Get<std::string>();
+
+            uint32 delay = wait ? wait : cumulativeDelay;
+            cumulativeDelay += std::max<uint32>(1, wait ? wait : NativeEventStepSeconds);
+
+            for (BotCandidate const& b : group)
+            {
+                if (NativeEventLeaderOnly && type != "teleport" && leader.GuidLow && b.GuidLow != leader.GuidLow)
+                    continue;
+
+                Player* player = FindOnlinePlayer(b.GuidLow);
+                if (!IsBotCandidateSafeToMove(player, b))
+                    continue;
+
+                NativeEventQueueStep step;
+                step.RunId = runId;
+                step.DungeonId = dungeon.Id;
+                step.GuidLow = b.GuidLow;
+                step.AccountId = b.AccountId;
+                step.Name = b.Name;
+                step.DungeonName = dungeon.Name;
+                step.StepOrder = order;
+                step.StepType = type;
+                step.Map = map;
+                step.X = x;
+                step.Y = y;
+                step.Z = z;
+                step.O = o;
+                step.ExecuteAt = now + delay;
+                step.Label = label;
+                _nativeEventQueue.push_back(step);
+                ++scheduled;
+            }
+        } while (result->NextRow());
+
+        if (scheduled)
+            StatusLog("[NativeClear] queued " + std::to_string(scheduled) + " native route actions for run #" + std::to_string(runId) + " " + dungeon.Name + ".");
+
+        ScheduleNativeFollowerLeash(runId, group, leader, cumulativeDelay);
+    }
+
     static uint32 TeleportOnlineGroupMembers(std::vector<BotCandidate> const& members, DungeonTemplate const& dungeon, TeleportLocation const& loc)
     {
         if (!AllowOnlineCharacterTouch || !TeleportOnlineMembers)
             return 0;
 
         uint32 moved = 0;
+        uint32 now = GameTime::GetGameTime().count();
+
         for (BotCandidate const& b : members)
         {
             Player* player = FindOnlinePlayer(b.GuidLow);
@@ -1074,14 +1931,66 @@ namespace PlayerbotDungeonSim
             if (player->IsInCombat())
                 player->CombatStop(true);
 
-            player->TeleportTo(loc.Map, loc.X, loc.Y, loc.Z, loc.O);
+            if (ProgressiveTeleport || InstanceWaypointTeleport)
+            {
+                std::vector<TeleportLocation> route;
+                if (ProgressiveTeleport)
+                    route = BuildProgressiveRoute(b.Team, dungeon, loc);
+                else
+                    route.push_back(loc);
+
+                std::vector<TeleportLocation> instanceWaypoints = LoadInstanceWaypointRoute(dungeon);
+                route.insert(route.end(), instanceWaypoints.begin(), instanceWaypoints.end());
+
+                if (route.empty())
+                    route.push_back(loc);
+
+                uint8 total = uint8(std::min<size_t>(route.size(), 255));
+                uint32 stepSeconds = InstanceWaypointTeleport ? InstanceWaypointStepSeconds : ProgressiveTeleportStepSeconds;
+                stepSeconds = std::max<uint32>(1, stepSeconds);
+
+                for (uint8 i = 0; i < total; ++i)
+                {
+                    TeleportLocation const& stepLoc = route[i];
+                    if (i == 0)
+                    {
+                        player->TeleportTo(stepLoc.Map, stepLoc.X, stepLoc.Y, stepLoc.Z, stepLoc.O);
+                        StatusLog("[JourneySim] " + b.Name + " -> " + dungeon.Name + " step 1/" + std::to_string(uint32(total)));
+                    }
+                    else
+                    {
+                        ProgressiveTravelStep step;
+                        step.GuidLow = b.GuidLow;
+                        step.AccountId = b.AccountId;
+                        step.Name = b.Name;
+                        step.DungeonName = dungeon.Name;
+                        step.Map = stepLoc.Map;
+                        step.X = stepLoc.X;
+                        step.Y = stepLoc.Y;
+                        step.Z = stepLoc.Z;
+                        step.O = stepLoc.O;
+                        step.ExecuteAt = now + (uint32(i) * stepSeconds);
+                        step.Step = i + 1;
+                        step.Total = total;
+                        _progressiveTravelQueue.push_back(step);
+                    }
+                }
+            }
+            else
+            {
+                player->TeleportTo(loc.Map, loc.X, loc.Y, loc.Z, loc.O);
+            }
+
             ++moved;
         }
 
         if (moved > 0)
         {
-            StatusLog("LIVE teleport " + std::to_string(moved) + "/" + std::to_string(members.size()) + " online bot(s) for " + dungeon.Name +
-                (loc.FromInstanceStart ? " to instance start." : " to outdoor entrance."));
+            if (ProgressiveTeleport || InstanceWaypointTeleport)
+                StatusLog("LIVE journey queued " + std::to_string(moved) + "/" + std::to_string(members.size()) + " online bot(s) for " + dungeon.Name + ".");
+            else
+                StatusLog("LIVE teleport " + std::to_string(moved) + "/" + std::to_string(members.size()) + " online bot(s) for " + dungeon.Name +
+                    (loc.FromInstanceStart ? " to instance start." : " to outdoor entrance."));
         }
 
         return moved;
@@ -1212,6 +2121,115 @@ namespace PlayerbotDungeonSim
     {
         std::transform(msg.begin(), msg.end(), msg.begin(), [](unsigned char c) { return std::tolower(c); });
         return msg;
+    }
+
+
+    static Role ParseRequestedRole(std::string const& lower)
+    {
+        if (lower.find("tank") != std::string::npos || lower.find("prot") != std::string::npos)
+            return ROLE_TANK;
+        if (lower.find("heal") != std::string::npos || lower.find("heals") != std::string::npos || lower.find("healer") != std::string::npos || lower.find("holy") != std::string::npos || lower.find("disc") != std::string::npos || lower.find("resto") != std::string::npos)
+            return ROLE_HEALER;
+        if (lower.find("dps") != std::string::npos || lower.find("damage") != std::string::npos || lower.find("frost") != std::string::npos || lower.find("fire") != std::string::npos || lower.find("shadow") != std::string::npos || lower.find("arms") != std::string::npos || lower.find("combat") != std::string::npos)
+            return ROLE_DPS;
+        return ROLE_UNKNOWN;
+    }
+
+    static bool LooksLikeLfgWhisper(std::string const& lower)
+    {
+        return lower.find("lfg") != std::string::npos || lower.find("inv") != std::string::npos || lower.find("invite") != std::string::npos || lower.find("dps") != std::string::npos || lower.find("tank") != std::string::npos || lower.find("heal") != std::string::npos;
+    }
+
+    static bool HandleBotWhisperJoin(Player* player, Player* receiver, std::string const& msg)
+    {
+        if (!PlayerWhisperJoin || !InviteRealPlayers || !player || !receiver)
+            return false;
+
+        if (!IsPlayerBotAccount(receiver) || IsPlayerBotAccount(player))
+            return false;
+
+        if (!PlayerWhisperJoinAllowGm && player->GetSession() && player->GetSession()->GetSecurity() > SEC_PLAYER)
+            return false;
+
+        std::string lower = LowerCopy(msg);
+        if (!LooksLikeLfgWhisper(lower))
+            return false;
+
+        Role requestedRole = ParseRequestedRole(lower);
+        if (PlayerWhisperJoinRequiresRole && requestedRole == ROLE_UNKNOWN)
+        {
+            ChatHandler(player->GetSession()).PSendSysMessage("DungeonSim: whisper a bot with a role, for example: `lfg dps`, `inv tank`, or `heals`.");
+            return true;
+        }
+        if (requestedRole == ROLE_UNKNOWN)
+            requestedRole = ROLE_DPS;
+
+        uint32 botGuid = receiver->GetGUID().GetCounter();
+        QueryResult runResult = CharacterDatabase.Query(
+            "SELECT r.id, r.dungeon_template_id, r.team "
+            "FROM playerbot_dungeon_run_member rm "
+            "JOIN playerbot_dungeon_run r ON r.id = rm.run_id "
+            "WHERE rm.guid = {} AND r.state IN ({},{}) "
+            "ORDER BY r.started_at DESC LIMIT 1",
+            botGuid, uint8(RUN_ACTIVE), uint8(RUN_REAL_ATTEMPT));
+
+        if (!runResult)
+        {
+            ChatHandler(player->GetSession()).PSendSysMessage("DungeonSim: {} is not currently leading or joining an open dungeon group.", receiver->GetName());
+            return true;
+        }
+
+        Field* rf = runResult->Fetch();
+        uint64 runId = rf[0].Get<uint64>();
+        uint32 dungeonTemplateId = rf[1].Get<uint32>();
+        uint8 team = rf[2].Get<uint8>();
+
+        QueryResult dungeonResult = WorldDatabase.Query("SELECT name, min_level, max_level, group_size, entrance_map, entrance_x, entrance_y, entrance_z, entrance_o FROM playerbot_dungeon_template WHERE id = {} LIMIT 1", dungeonTemplateId);
+        if (!dungeonResult)
+            return true;
+
+        Field* df = dungeonResult->Fetch();
+        DungeonTemplate dungeon;
+        dungeon.Id = dungeonTemplateId;
+        dungeon.Name = df[0].Get<std::string>();
+        dungeon.MinLevel = df[1].Get<uint8>();
+        dungeon.MaxLevel = df[2].Get<uint8>();
+        dungeon.GroupSize = df[3].Get<uint8>();
+        dungeon.EntranceMap = df[4].Get<uint32>();
+        dungeon.X = df[5].Get<float>();
+        dungeon.Y = df[6].Get<float>();
+        dungeon.Z = df[7].Get<float>();
+        dungeon.O = df[8].Get<float>();
+
+        if (!IsRealPlayerEligibleForInvite(player, dungeon, team))
+        {
+            ChatHandler(player->GetSession()).PSendSysMessage("DungeonSim: you are not eligible for {} right now.", dungeon.Name);
+            return true;
+        }
+
+        QueryResult memberCountResult = CharacterDatabase.Query("SELECT COUNT(DISTINCT guid) FROM playerbot_dungeon_run_member WHERE run_id = {}", runId);
+        uint32 memberCount = memberCountResult ? memberCountResult->Fetch()[0].Get<uint32>() : dungeon.GroupSize;
+        if (memberCount >= dungeon.GroupSize)
+        {
+            ChatHandler(player->GetSession()).PSendSysMessage("DungeonSim: {}'s {} group is already full.", receiver->GetName(), dungeon.Name);
+            return true;
+        }
+
+        uint32 playerGuid = player->GetGUID().GetCounter();
+        CharacterDatabase.Execute(
+            "INSERT IGNORE INTO playerbot_dungeon_run_member "
+            "(run_id, guid, role, guild_id, level_at_start, joined_as_real_player) VALUES ({},{},{},0,{},1)",
+            runId, playerGuid, uint8(requestedRole), player->GetLevel());
+
+        if (!player->GetGroup() && receiver->GetGroup())
+        {
+            Group* group = receiver->GetGroup();
+            group->AddMember(player);
+        }
+
+        ChatHandler(player->GetSession()).PSendSysMessage("DungeonSim: you joined {}'s {} group as {}. No teleport was used; travel/summon normally.", receiver->GetName(), dungeon.Name, RoleText(requestedRole));
+        StatusLog("[LFGSim] " + player->GetName() + " whispered " + receiver->GetName() + " and joined " + dungeon.Name + " as " + RoleText(requestedRole) + ".");
+        return true;
     }
 
     static bool HandleInviteChat(Player* player, std::string const& msg)
@@ -1354,8 +2372,27 @@ namespace PlayerbotDungeonSim
 
     static uint64 AllocateRunId()
     {
-        QueryResult result = CharacterDatabase.Query("SELECT COALESCE(MAX(id), 0) + 1 FROM playerbot_dungeon_run");
-        return result ? result->Fetch()[0].Get<uint64>() : 0;
+        // Do not call SELECT MAX(id)+1 for every run. CharacterDatabase.Execute() is async on many AC branches,
+        // so two starts in the same tick can otherwise allocate the same id before the first insert is visible.
+        static uint64 nextRunId = 0;
+
+        if (!nextRunId)
+        {
+            QueryResult result = CharacterDatabase.Query("SELECT COALESCE(MAX(id), 0) + 1 FROM playerbot_dungeon_run");
+            nextRunId = result ? result->Fetch()[0].Get<uint64>() : 1;
+            if (!nextRunId)
+                nextRunId = 1;
+        }
+
+        for (uint8 attempt = 0; attempt < 16; ++attempt)
+        {
+            uint64 candidate = nextRunId++;
+            QueryResult exists = CharacterDatabase.Query("SELECT 1 FROM playerbot_dungeon_run WHERE id = {} LIMIT 1", candidate);
+            if (!exists)
+                return candidate;
+        }
+
+        return 0;
     }
 
     static void CleanupEmptyActiveRuns()
@@ -1434,7 +2471,62 @@ namespace PlayerbotDungeonSim
         }
     }
 
-    static void CreateRun(DungeonTemplate const& dungeon, std::vector<BotCandidate> const& group)
+    static void AuditRunMembers(uint64 runId, DungeonTemplate const& dungeon, std::vector<BotCandidate> const& group, std::string const& phase)
+    {
+        if (!AuditFileLog || !AuditFileMembers)
+            return;
+
+        uint32 tanks = 0;
+        uint32 healers = 0;
+        uint32 dps = 0;
+        uint32 online = 0;
+        uint32 movable = 0;
+        std::unordered_set<uint32> seen;
+        uint32 duplicates = 0;
+
+        for (BotCandidate const& b : group)
+        {
+            if (!seen.insert(b.GuidLow).second)
+                ++duplicates;
+
+            if (b.PreferredRole == ROLE_TANK)
+                ++tanks;
+            else if (b.PreferredRole == ROLE_HEALER)
+                ++healers;
+            else
+                ++dps;
+
+            Player* player = FindOnlinePlayer(b.GuidLow);
+            if (player)
+                ++online;
+            if (IsBotCandidateSafeToMove(player, b))
+                ++movable;
+        }
+
+        AuditLog("RUN", phase + " run #" + std::to_string(runId) + " " + TeamName(group.empty() ? TEAM_ALLIANCE : group.front().Team) + " " + dungeon.Name +
+            " members=" + std::to_string(group.size()) + " distinct=" + std::to_string(seen.size()) +
+            " duplicates=" + std::to_string(duplicates) + " roles=" + std::to_string(tanks) + "T/" +
+            std::to_string(healers) + "H/" + std::to_string(dps) + "D online=" + std::to_string(online) +
+            " movable=" + std::to_string(movable));
+
+        for (BotCandidate const& b : group)
+        {
+            Player* player = FindOnlinePlayer(b.GuidLow);
+            AuditLog("MEMBER", "run #" + std::to_string(runId) + " " + b.Name +
+                " guid=" + std::to_string(b.GuidLow) +
+                " account=" + std::to_string(b.AccountId) +
+                " level=" + std::to_string(uint32(b.Level)) +
+                " class=" + ClassNameText(b.Class) +
+                " role=" + RoleText(b.PreferredRole) +
+                " team=" + TeamName(b.Team) +
+                " guild=" + std::to_string(b.GuildId) +
+                " dbOnline=" + std::to_string(b.DbOnline ? 1 : 0) +
+                " object=" + std::to_string(player ? 1 : 0) +
+                " movable=" + std::to_string(IsBotCandidateSafeToMove(player, b) ? 1 : 0));
+        }
+    }
+
+    static void CreateRun(DungeonTemplate const& dungeon, std::vector<BotCandidate> const& group, RunExecutionMode mode)
     {
         if (group.empty())
         {
@@ -1453,12 +2545,13 @@ namespace PlayerbotDungeonSim
             return;
         }
 
+        bool realMode = mode == RUN_MODE_REAL;
         TeleportLocation runLoc = ResolveTeleportLocation(dungeon);
         uint32 onlineReady = AllowOnlineCharacterTouch ? CountOnlineMovableGroupMembers(group) : 0;
-        if (RealRunFirst && MinOnlineMembersForLiveRun > 0)
+        if (realMode && MinOnlineMembersForLiveRun > 0)
             LogLiveRosterDiagnostics(dungeon, group, onlineReady);
 
-        if (RealRunFirst && MinOnlineMembersForLiveRun > 0 && onlineReady < MinOnlineMembersForLiveRun)
+        if (realMode && MinOnlineMembersForLiveRun > 0 && onlineReady < MinOnlineMembersForLiveRun)
         {
             DebugLog("Skipped live attempt for " + dungeon.Name + ": only " + std::to_string(onlineReady) +
                 " online/movable bot(s), need " + std::to_string(MinOnlineMembersForLiveRun) + ".");
@@ -1475,19 +2568,27 @@ namespace PlayerbotDungeonSim
                 return;
         }
 
-        bool madeLiveGroup = RealRunFirst && CreateLiveGroupIfPossible(group);
+        // Organic auto-runs should look like groups formed through chat first, then entered the dungeon.
+        // GM forced runs use StartGmRun directly and remain immediate test tools.
+        MaybeSendGuildLfm(group, dungeon);
+        MaybeSendGeneralLfg(group, dungeon);
+        SendStructuredLfgSimulation(group, dungeon);
+        if (!StructuredLfgSimulation)
+            SendOrganicLfgActing(group, dungeon);
+
+        bool madeLiveGroup = realMode && CreateLiveGroupIfPossible(group);
 
         // Bot-only runs may auto-teleport. Runs that may invite a real player should not yank anyone,
         // because those are meant to feel like a real party that travels/summons together.
-        bool mayInviteRealPlayer = InviteRealPlayers && MaxRealPlayerInvitesPerRun > 0 && (!InviteOnlyIfGroupShort || group.size() < dungeon.GroupSize);
+        bool mayInviteRealPlayer = realMode && InviteRealPlayers && MaxRealPlayerInvitesPerRun > 0 && (!InviteOnlyIfGroupShort || group.size() < dungeon.GroupSize);
         bool allowAutoTeleport = TeleportOnlineMembers && !(ManualTravelForPlayerJoinedRuns && mayInviteRealPlayer);
-        uint32 movedOnline = (RealRunFirst && allowAutoTeleport) ? TeleportOnlineGroupMembers(group, dungeon, runLoc) : 0;
-        uint8 initialState = (RealRunFirst && movedOnline > 0) ? RUN_REAL_ATTEMPT : RUN_ACTIVE;
+        uint32 movedOnline = (AllowOnlineCharacterTouch && allowAutoTeleport) ? TeleportOnlineGroupMembers(group, dungeon, runLoc) : 0;
+        uint8 initialState = realMode ? RUN_REAL_ATTEMPT : RUN_ACTIVE;
 
         if (ManualTravelForPlayerJoinedRuns && mayInviteRealPlayer)
             DebugLog("Manual travel mode for " + dungeon.Name + ": real-player invite possible, no auto-teleport used.");
 
-        if (TeleportOnlyIfOnline && RealRunFirst && allowAutoTeleport && movedOnline == 0)
+        if (TeleportOnlyIfOnline && realMode && allowAutoTeleport && movedOnline == 0)
         {
             DebugLog("Skipped run for " + dungeon.Name + " because no online members could be teleported.");
             return;
@@ -1508,17 +2609,17 @@ namespace PlayerbotDungeonSim
             runId, dungeon.Id, group.front().Team, guildId, initialState, now, now + duration, quality, duration,
             madeLiveGroup ? 1 : 0, movedOnline, runLoc.Map, runLoc.X, runLoc.Y, runLoc.Z, runLoc.O);
 
+        AuditRunMembers(runId, dungeon, group, "START " + RunModeText(mode));
+
         SaveRunLockout(dungeon, group.front().Team, guildId);
 
-        MaybeSendGuildLfm(group, dungeon);
-        MaybeSendGeneralLfg(group, dungeon);
-        SendOrganicLfgActing(group, dungeon);
-        CreateRealPlayerInvites(runId, dungeon, group);
+        if (realMode)
+            CreateRealPlayerInvites(runId, dungeon, group);
 
         for (BotCandidate const& b : group)
         {
             CharacterDatabase.Execute(
-                "INSERT INTO playerbot_dungeon_run_member "
+                "INSERT IGNORE INTO playerbot_dungeon_run_member "
                 "(run_id, guid, role, guild_id, level_at_start, joined_as_real_player) "
                 "VALUES ({},{},{},{},{},0)",
                 runId, b.GuidLow, uint8(b.PreferredRole), b.GuildId, b.Level);
@@ -1540,11 +2641,14 @@ namespace PlayerbotDungeonSim
             } while (bosses->NextRow());
         }
 
-        StatusLog("START run #" + std::to_string(runId) + " " + TeamName(group.front().Team) + " " + dungeon.Name +
+        StatusLog("START " + RunModeText(mode) + " run #" + std::to_string(runId) + " " + TeamName(group.front().Team) + " " + dungeon.Name +
             " members=" + std::to_string(group.size()) + " guild=" + std::to_string(guildId) +
             " quality=" + std::to_string(quality) + " duration=" + std::to_string(duration / MINUTE) + "m" +
             " liveGroup=" + std::to_string(madeLiveGroup ? 1 : 0) + " moved=" + std::to_string(movedOnline) +
             " dest=" + (runLoc.FromInstanceStart ? "instance" : "entrance"));
+
+        if (realMode)
+            ScheduleNativeEventSteps(runId, dungeon, group);
 
         // Next pass:
         // - Issue playerbot strategy/orders where your Playerbots branch exposes API hooks.
@@ -1907,10 +3011,218 @@ namespace PlayerbotDungeonSim
                 }
 
                 RecordLootAward(runId, winner->GuidLow, picked.ItemEntry, bossName, storedOnline, equipped, upgradeScore, equipSlot);
+                std::string itemName = proto ? proto->Name1 : std::string("item#") + std::to_string(picked.ItemEntry);
                 DebugLog("Awarded item " + std::to_string(picked.ItemEntry) + " from " + bossName + " to " + winner->Name +
                     (storedOnline ? " delivered" : " pending") + (equipped ? " and equipped." : "."));
+                if (AuditFileLoot)
+                    AuditLog("LOOT", "run #" + std::to_string(runId) + " boss='" + bossName + "' winner=" + winner->Name +
+                        " guid=" + std::to_string(winner->GuidLow) + " item=" + std::to_string(picked.ItemEntry) +
+                        " itemName='" + itemName + "' delivery=" + (storedOnline ? "online" : "pending") +
+                        " equipped=" + std::to_string(equipped ? 1 : 0) + " upgradeScore=" + std::to_string(upgradeScore) +
+                        " equipSlot=" + std::to_string(uint32(equipSlot)));
             }
         } while (killedBosses->NextRow());
+    }
+
+
+    static uint32 GetEffectiveXpLevelCap()
+    {
+        if (XpLevelCap > 0)
+            return std::min<uint32>(XpLevelCap, 80);
+
+        uint32 cap = GetEffectiveServerLevelCap();
+        if (cap == 0)
+            cap = 80;
+        return std::min<uint32>(cap, 80);
+    }
+
+    static uint32 GetXpForLevel(uint32 level)
+    {
+        level = std::max<uint32>(1, std::min<uint32>(level, 79));
+
+        static bool checkedColumns = false;
+        static std::string levelColumn = "lvl";
+        static std::string xpColumn = "xp_for_next_level";
+
+        if (!checkedColumns)
+        {
+            checkedColumns = true;
+
+            QueryResult levelCol = WorldDatabase.Query(
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'player_xp_for_level' "
+                "AND COLUMN_NAME IN ('lvl','Level') ORDER BY FIELD(COLUMN_NAME,'lvl','Level') LIMIT 1");
+            if (levelCol)
+                levelColumn = levelCol->Fetch()[0].Get<std::string>();
+
+            QueryResult xpCol = WorldDatabase.Query(
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'player_xp_for_level' "
+                "AND COLUMN_NAME IN ('xp_for_next_level','Experience') ORDER BY FIELD(COLUMN_NAME,'xp_for_next_level','Experience') LIMIT 1");
+            if (xpCol)
+                xpColumn = xpCol->Fetch()[0].Get<std::string>();
+        }
+
+        QueryResult result = WorldDatabase.Query(
+            "SELECT `{}` FROM player_xp_for_level WHERE `{}` = {} LIMIT 1",
+            xpColumn, levelColumn, level);
+
+        if (result)
+        {
+            uint32 xp = result->Fetch()[0].Get<uint32>();
+            if (xp > 0)
+                return xp;
+        }
+
+        // Fallback only if the core table is missing/unexpected. Close enough for SIM math.
+        return std::max<uint32>(400, level * 1000);
+    }
+
+    static uint32 CalculateDungeonXpPercent(uint8 killedBosses, uint8 totalBosses)
+    {
+        if (XpPercentOfLevel == 0 || killedBosses == 0)
+            return 0;
+
+        uint32 percent = std::min<uint32>(XpPercentOfLevel, 100);
+        if (XpScaleByBossKills && totalBosses > 0)
+        {
+            percent = uint32(std::ceil((double(percent) * double(killedBosses)) / double(totalBosses)));
+            if (killedBosses > 0)
+                percent = std::max<uint32>(std::min<uint32>(XpMinimumPercentOnAnyKill, XpPercentOfLevel), percent);
+        }
+
+        return std::min<uint32>(percent, 100);
+    }
+
+    static bool GiveXpOnline(Player* player, uint32 xpAmount)
+    {
+        if (!player || xpAmount == 0)
+            return false;
+
+        if (!IsPlayerBotAccount(player))
+            return false;
+
+        if (player->GetLevel() >= GetEffectiveXpLevelCap())
+            return false;
+
+        player->GiveXP(xpAmount, nullptr);
+        return true;
+    }
+
+    static void RecordXpAward(uint64 runId, BotCandidate const& member, uint32 xpAmount, uint32 percent, uint8 killedBosses, uint8 totalBosses, bool delivered, std::string note)
+    {
+        uint8 deliveryState = delivered ? 2 : (note.find("failed") != std::string::npos ? 1 : 0);
+        CharacterDatabase.EscapeString(note);
+        CharacterDatabase.Execute(
+            "INSERT INTO playerbot_dungeon_xp_award "
+            "(run_id, guid, level_at_award, xp_amount, percent_of_level, killed_bosses, total_bosses, delivered, delivered_at, awarded_at, note) "
+            "VALUES ({},{},{},{},{},{},{},{},{},{},'{}')",
+            runId, member.GuidLow, uint32(member.Level), xpAmount, percent, uint32(killedBosses), uint32(totalBosses),
+            deliveryState, delivered ? GameTime::GetGameTime().count() : 0, GameTime::GetGameTime().count(), note);
+    }
+
+    static void AwardXpForRun(uint64 runId, uint32 dungeonTemplateId, uint8 killedBosses, uint8 totalBosses)
+    {
+        (void)dungeonTemplateId;
+
+        if (!AwardXp || killedBosses == 0)
+            return;
+
+        uint32 percent = CalculateDungeonXpPercent(killedBosses, totalBosses);
+        if (percent == 0)
+            return;
+
+        uint32 cap = GetEffectiveXpLevelCap();
+        std::vector<BotCandidate> members = LoadRunMembers(runId);
+        if (members.empty())
+            return;
+
+        for (BotCandidate const& member : members)
+        {
+            if (!AccountMatchesBotFilter(member.AccountId))
+                continue;
+
+            if (member.Level >= cap)
+            {
+                if (AuditFileLoot)
+                    AuditLog("XP", "run #" + std::to_string(runId) + " skipped " + member.Name +
+                        " guid=" + std::to_string(member.GuidLow) + " level=" + std::to_string(uint32(member.Level)) +
+                        " cap=" + std::to_string(cap));
+                continue;
+            }
+
+            uint32 xpForLevel = GetXpForLevel(member.Level);
+            uint32 xpAmount = std::max<uint32>(1, (xpForLevel * percent) / 100);
+            bool delivered = false;
+            std::string note = "pending";
+
+            if (AllowOnlineCharacterTouch && GiveXpToOnlinePlayers)
+            {
+                Player* player = FindOnlinePlayer(member.GuidLow);
+                if (player)
+                {
+                    delivered = GiveXpOnline(player, xpAmount);
+                    note = delivered ? "delivered_online" : "online_delivery_failed_or_capped";
+                }
+            }
+
+            RecordXpAward(runId, member, xpAmount, percent, killedBosses, totalBosses, delivered, note);
+
+            if (AuditFileLoot)
+                AuditLog("XP", "run #" + std::to_string(runId) + " member=" + member.Name +
+                    " guid=" + std::to_string(member.GuidLow) + " level=" + std::to_string(uint32(member.Level)) +
+                    " xp=" + std::to_string(xpAmount) + " percent=" + std::to_string(percent) +
+                    " bosses=" + std::to_string(uint32(killedBosses)) + "/" + std::to_string(uint32(totalBosses)) +
+                    " delivery=" + (delivered ? "online" : "pending") + " cap=" + std::to_string(cap));
+        }
+    }
+
+    static void DeliverPendingXp(Player* player)
+    {
+        if (!AllowOnlineCharacterTouch || !DeliverPendingXpOnLogin || !player || !IsPlayerBotAccount(player))
+            return;
+
+        if (player->GetLevel() >= GetEffectiveXpLevelCap())
+            return;
+
+        uint32 guidLow = player->GetGUID().GetCounter();
+        QueryResult pending = CharacterDatabase.Query(
+            "SELECT id, xp_amount FROM playerbot_dungeon_xp_award "
+            "WHERE guid = {} AND delivered = 0 ORDER BY id ASC LIMIT {}",
+            guidLow, MaxPendingXpDeliveriesPerLogin);
+
+        if (!pending)
+            return;
+
+        uint32 delivered = 0;
+        do
+        {
+            Field* f = pending->Fetch();
+            uint64 awardId = f[0].Get<uint64>();
+            uint32 xpAmount = f[1].Get<uint32>();
+
+            bool ok = GiveXpOnline(player, xpAmount);
+            CharacterDatabase.Execute(
+                "UPDATE playerbot_dungeon_xp_award SET delivered = {}, delivered_at = {}, note = '{}' WHERE id = {}",
+                ok ? 2 : 1, ok ? GameTime::GetGameTime().count() : 0, ok ? "delivered_on_login" : "delivery_failed_or_capped", awardId);
+
+            if (AuditFileLoot)
+                AuditLog("XP_DELIVERY", "player=" + player->GetName() + " guid=" + std::to_string(guidLow) +
+                    " awardId=" + std::to_string(awardId) + " xp=" + std::to_string(xpAmount) +
+                    " delivered=" + std::to_string(ok ? 1 : 0));
+
+            if (ok)
+                ++delivered;
+
+            if (player->GetLevel() >= GetEffectiveXpLevelCap())
+                break;
+        } while (pending->NextRow());
+
+        if (delivered > 0)
+        {
+            ChatHandler(player->GetSession()).PSendSysMessage("Dungeon sim delivered {} pending XP award(s).", delivered);
+            DebugLog("Delivered " + std::to_string(delivered) + " pending XP award(s) to " + player->GetName());
+        }
     }
 
     static void DeliverPendingLoot(Player* player)
@@ -1945,6 +3257,12 @@ namespace PlayerbotDungeonSim
                 "WHERE id = {}",
                 stored ? 2 : 1, stored ? 1 : 0, equipped ? 1 : 0, stored ? GameTime::GetGameTime().count() : 0,
                 upgradeScore, equipSlot, stored ? "delivered_on_login" : "delivery_failed_bags_full_or_invalid", awardId);
+
+            if (AuditFileLoot)
+                AuditLog("LOOT_DELIVERY", "player=" + player->GetName() + " guid=" + std::to_string(guidLow) +
+                    " awardId=" + std::to_string(awardId) + " item=" + std::to_string(itemEntry) +
+                    " stored=" + std::to_string(stored ? 1 : 0) + " equipped=" + std::to_string(equipped ? 1 : 0) +
+                    " upgradeScore=" + std::to_string(upgradeScore));
 
             if (stored)
                 ++delivered;
@@ -2084,6 +3402,19 @@ namespace PlayerbotDungeonSim
                 killed = result == RESULT_FULL_CLEAR ? bossCount : (result == RESULT_PARTIAL ? urand(1, bossCount) : 0);
             }
 
+            uint8 originalKilled = killed;
+            uint8 minBossKills = uint8(std::min<uint32>(SimMinimumBossKillsForLoot, bossCount));
+            if (AwardLoot && bossCount > 0 && minBossKills > 0 && (!isRaid || SimMinimumBossKillsApplyToRaids) && killed < minBossKills)
+            {
+                killed = minBossKills;
+                if (result == RESULT_WIPE || result == RESULT_ABANDONED)
+                    result = RESULT_PARTIAL;
+
+                AuditLog("LOOT", "run #" + std::to_string(runId) + " minimum loot boss floor raised kills " +
+                    std::to_string(originalKilled) + " -> " + std::to_string(killed) +
+                    " for " + GetDungeonTemplateName(dungeonId));
+            }
+
             CharacterDatabase.Execute("UPDATE playerbot_dungeon_run SET state = {}, result = {}, bosses_killed = {} WHERE id = {}",
                 uint8((result == RESULT_WIPE || result == RESULT_ABANDONED) ? RUN_FAILED : RUN_COMPLETED), uint8(result), killed, runId);
             CharacterDatabase.Execute("UPDATE playerbot_dungeon_run_boss SET killed = 1 WHERE run_id = {} AND boss_order <= {}", runId, killed);
@@ -2092,6 +3423,9 @@ namespace PlayerbotDungeonSim
 
             std::string dungeonName = GetDungeonTemplateName(dungeonId);
             StatusLog("END run #" + std::to_string(runId) + " " + TeamName(team) + " " + dungeonName +
+                " result=" + std::to_string(result) + " bosses=" + std::to_string(killed) + "/" + std::to_string(bossCount) +
+                " guild=" + std::to_string(guildId));
+            AuditLog("RUN_END", "run #" + std::to_string(runId) + " " + TeamName(team) + " " + dungeonName +
                 " result=" + std::to_string(result) + " bosses=" + std::to_string(killed) + "/" + std::to_string(bossCount) +
                 " guild=" + std::to_string(guildId));
 
@@ -2105,7 +3439,10 @@ namespace PlayerbotDungeonSim
             }
 
             if (killed > 0)
+            {
                 AwardLootForRun(runId, dungeonId);
+                AwardXpForRun(runId, dungeonId, killed, bossCount);
+            }
         } while (runs->NextRow());
     }
 
@@ -2139,7 +3476,7 @@ namespace PlayerbotDungeonSim
             uint32 moved = f[8].Get<uint32>();
             uint32 remaining = endsAt > now ? endsAt - now : 0;
 
-            QueryResult members = CharacterDatabase.Query("SELECT COUNT(*) FROM playerbot_dungeon_run_member WHERE run_id = {}", runId);
+            QueryResult members = CharacterDatabase.Query("SELECT COUNT(DISTINCT guid) FROM playerbot_dungeon_run_member WHERE run_id = {}", runId);
             uint32 memberCount = members ? members->Fetch()[0].Get<uint32>() : 0;
             uint32 onlineCount = StatusShowOnlineMembers ? CountOnlineRunMembers(runId, false) : 0;
             uint32 movableCount = StatusShowOnlineMembers ? CountOnlineRunMembers(runId, true) : 0;
@@ -2215,6 +3552,8 @@ namespace PlayerbotDungeonSim
         std::string name = TrimCopy(rawName);
         if (name.empty())
             return false;
+
+        name = ResolveDungeonAlias(name);
 
         QueryResult result;
         if (IsUnsignedNumber(name))
@@ -2318,10 +3657,12 @@ namespace PlayerbotDungeonSim
         return true;
     }
 
-    static bool StartGmLiveRun(ChatHandler* handler, DungeonTemplate const& dungeon, std::vector<BotCandidate> const& group)
+    static bool StartGmRun(ChatHandler* handler, DungeonTemplate const& dungeon, std::vector<BotCandidate> const& group, RunExecutionMode mode)
     {
         if (!handler)
             return false;
+
+        bool realMode = mode == RUN_MODE_REAL;
 
         if (!Enable)
         {
@@ -2329,15 +3670,15 @@ namespace PlayerbotDungeonSim
             return false;
         }
 
-        if (!AllowOnlineCharacterTouch)
+        if (realMode && !AllowOnlineCharacterTouch)
         {
-            handler->PSendSysMessage("DungeonSim live commands need PlayerbotDungeonSim.AllowOnlineCharacterTouch = 1.");
+            handler->PSendSysMessage("DungeonSim REAL mode needs PlayerbotDungeonSim.AllowOnlineCharacterTouch = 1.");
             return false;
         }
 
-        if (!TeleportOnlineMembers)
+        if (realMode && !TeleportOnlineMembers)
         {
-            handler->PSendSysMessage("DungeonSim live commands need PlayerbotDungeonSim.TeleportOnlineMembers = 1.");
+            handler->PSendSysMessage("DungeonSim REAL mode needs PlayerbotDungeonSim.TeleportOnlineMembers = 1.");
             return false;
         }
 
@@ -2354,9 +3695,9 @@ namespace PlayerbotDungeonSim
         }
 
         uint32 onlineReady = CountOnlineMovableGroupMembers(group);
-        if (onlineReady < std::max<uint32>(1, MinOnlineMembersForLiveRun))
+        if (realMode && onlineReady < std::max<uint32>(1, MinOnlineMembersForLiveRun))
         {
-            handler->PSendSysMessage("{} has {} staged bot(s), but only {} online/movable. Need at least {}.",
+            handler->PSendSysMessage("{} has {} staged bot(s), but only {} online/movable. Need at least {} for REAL mode.",
                 dungeon.Name, uint32(group.size()), onlineReady, std::max<uint32>(1, MinOnlineMembersForLiveRun));
             LogLiveRosterDiagnostics(dungeon, group, onlineReady);
             return false;
@@ -2368,11 +3709,11 @@ namespace PlayerbotDungeonSim
         uint32 guildId = GetRunGuildId(group);
         TeleportLocation loc = ResolveTeleportLocation(dungeon);
 
-        bool madeLiveGroup = CreateLiveGroupIfPossible(group);
-        uint32 movedOnline = TeleportOnlineGroupMembers(group, dungeon, loc);
-        if (movedOnline == 0)
+        bool madeLiveGroup = realMode && CreateLiveGroupIfPossible(group);
+        uint32 movedOnline = (AllowOnlineCharacterTouch && TeleportOnlineMembers) ? TeleportOnlineGroupMembers(group, dungeon, loc) : 0;
+        if (realMode && movedOnline == 0)
         {
-            handler->PSendSysMessage("No staged online bots could be teleported for {}.", dungeon.Name);
+            handler->PSendSysMessage("No staged online bots could be teleported for {} in REAL mode.", dungeon.Name);
             return false;
         }
 
@@ -2388,13 +3729,15 @@ namespace PlayerbotDungeonSim
             "(id, dungeon_template_id, team, guild_id, state, started_at, ends_at, quality_score, planned_duration_sec, "
             "real_group_created, online_members_moved, entrance_map, entrance_x, entrance_y, entrance_z, entrance_o) "
             "VALUES ({},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{})",
-            runId, dungeon.Id, group.front().Team, guildId, uint8(RUN_REAL_ATTEMPT), now, now + duration, quality, duration,
+            runId, dungeon.Id, group.front().Team, guildId, uint8(realMode ? RUN_REAL_ATTEMPT : RUN_ACTIVE), now, now + duration, quality, duration,
             madeLiveGroup ? 1 : 0, movedOnline, loc.Map, loc.X, loc.Y, loc.Z, loc.O);
+
+        AuditRunMembers(runId, dungeon, group, "GM START " + RunModeText(mode));
 
         for (BotCandidate const& b : group)
         {
             CharacterDatabase.Execute(
-                "INSERT INTO playerbot_dungeon_run_member "
+                "INSERT IGNORE INTO playerbot_dungeon_run_member "
                 "(run_id, guid, role, guild_id, level_at_start, joined_as_real_player) "
                 "VALUES ({},{},{},{},{},0)",
                 runId, b.GuidLow, uint8(b.PreferredRole), b.GuildId, b.Level);
@@ -2402,17 +3745,81 @@ namespace PlayerbotDungeonSim
 
         InsertRunBossRows(runId, dungeon.Id);
 
-        StatusLog("GM START run #" + std::to_string(runId) + " " + TeamName(group.front().Team) + " " + dungeon.Name +
+        StatusLog("GM START " + RunModeText(mode) + " run #" + std::to_string(runId) + " " + TeamName(group.front().Team) + " " + dungeon.Name +
             " members=" + std::to_string(group.size()) + " liveGroup=" + std::to_string(madeLiveGroup ? 1 : 0) +
             " moved=" + std::to_string(movedOnline) + " dest=" + (loc.FromInstanceStart ? "instance" : "entrance"));
 
-        handler->PSendSysMessage("DungeonSim GM run #{} started: {} {} member(s), moved {} online bot(s).",
-            uint32(runId), dungeon.Name, uint32(group.size()), movedOnline);
+        if (realMode)
+            ScheduleNativeEventSteps(runId, dungeon, group);
+
+        handler->PSendSysMessage("DungeonSim GM {} run #{} started: {} {} member(s), moved {} online bot(s).",
+            RunModeText(mode), uint32(runId), dungeon.Name, uint32(group.size()), movedOnline);
         return true;
     }
 
-    static bool CommandCreate(ChatHandler* handler, std::string const& dungeonName)
+
+    static bool SelectBestBotGroupForDungeon(DungeonTemplate const& dungeon, RunExecutionMode mode, std::vector<BotCandidate>& bestGroup, uint8& bestFactionWeight, uint32& bestOnline)
     {
+        bestGroup.clear();
+        bestFactionWeight = 0;
+        bestOnline = 0;
+
+        for (uint8 team : { uint8(TEAM_ALLIANCE), uint8(TEAM_HORDE) })
+        {
+            uint8 factionWeight = DungeonFactionWeight(dungeon, team);
+            if (factionWeight == 0)
+                continue;
+
+            std::vector<BotCandidate> candidates = LoadEligibleBots(team, dungeon.MinLevel, dungeon.MaxLevel, dungeon.GroupSize * 40);
+            if (mode == RUN_MODE_REAL && RequireOnlineBotsForRun)
+            {
+                candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [](BotCandidate const& b)
+                {
+                    return !IsBotCandidateSafeToMove(FindOnlinePlayer(b.GuidLow), b);
+                }), candidates.end());
+            }
+
+            std::vector<BotCandidate> group;
+            if (!BuildGroup(candidates, dungeon, group))
+                continue;
+
+            uint32 online = CountOnlineMovableGroupMembers(group);
+            if (bestGroup.empty() || factionWeight > bestFactionWeight || (factionWeight == bestFactionWeight && online > bestOnline))
+            {
+                bestOnline = online;
+                bestFactionWeight = factionWeight;
+                bestGroup = group;
+            }
+        }
+
+        return !bestGroup.empty();
+    }
+
+    static bool CommandCreate(ChatHandler* handler, std::string const& rawArgs)
+    {
+        std::string args = TrimCopy(rawArgs);
+        RunExecutionMode mode = ConfiguredRunMode;
+        std::string first = PopFirstToken(args);
+        std::string dungeonName;
+
+        bool matchedMode = false;
+        RunExecutionMode parsedMode = ParseRunModeToken(first, mode, &matchedMode);
+        if (matchedMode)
+        {
+            mode = parsedMode;
+            dungeonName = TrimCopy(args);
+        }
+        else
+        {
+            dungeonName = TrimCopy(rawArgs);
+        }
+
+        if (dungeonName.empty())
+        {
+            handler->PSendSysMessage("Usage: .dng-sim create [sim|real] <INSTANCE>");
+            return true;
+        }
+
         DungeonTemplate dungeon;
         if (!LoadDungeonTemplateByNameOrId(dungeonName, dungeon))
         {
@@ -2422,34 +3829,19 @@ namespace PlayerbotDungeonSim
 
         std::vector<BotCandidate> bestGroup;
         uint32 bestOnline = 0;
-        for (uint8 team : { uint8(TEAM_ALLIANCE), uint8(TEAM_HORDE) })
-        {
-            std::vector<BotCandidate> candidates = LoadEligibleBots(team, dungeon.MinLevel, dungeon.MaxLevel, dungeon.GroupSize * 40);
-            candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [](BotCandidate const& b)
-            {
-                return !IsBotCandidateSafeToMove(FindOnlinePlayer(b.GuidLow), b);
-            }), candidates.end());
-
-            std::vector<BotCandidate> group;
-            if (!BuildGroup(candidates, dungeon, group))
-                continue;
-
-            uint32 online = CountOnlineMovableGroupMembers(group);
-            if (online > bestOnline)
-            {
-                bestOnline = online;
-                bestGroup = group;
-            }
-        }
+        uint8 bestFactionWeight = 0;
+        SelectBestBotGroupForDungeon(dungeon, mode, bestGroup, bestFactionWeight, bestOnline);
 
         if (bestGroup.empty())
         {
-            handler->PSendSysMessage("DungeonSim: no full online/movable bot group found for {} levels {}-{}.",
-                dungeon.Name, uint32(dungeon.MinLevel), uint32(dungeon.MaxLevel));
+            handler->PSendSysMessage("DungeonSim: no {} bot group found for {} levels {}-{}.",
+                RunModeText(mode), dungeon.Name, uint32(dungeon.MinLevel), uint32(dungeon.MaxLevel));
             return true;
         }
 
-        StartGmLiveRun(handler, dungeon, bestGroup);
+        handler->PSendSysMessage("DungeonSim selected {} group for {} in {} mode (faction weight {}%).", TeamName(bestGroup.front().Team), dungeon.Name, RunModeText(mode), uint32(bestFactionWeight));
+
+        StartGmRun(handler, dungeon, bestGroup, mode);
         return true;
     }
 
@@ -2479,6 +3871,15 @@ namespace PlayerbotDungeonSim
             return true;
         }
 
+        uint8 factionWeight = DungeonFactionWeight(dungeon, bot.Team);
+        if (factionWeight == 0)
+        {
+            handler->PSendSysMessage("{} cannot be staged for {}: {} is not allowed for this instance by DungeonSim faction rules.", bot.Name, dungeon.Name, TeamName(bot.Team));
+            return true;
+        }
+        if (factionWeight < 100)
+            handler->PSendSysMessage("Note: {} is an unusual {} choice for {} (weight {}%).", TeamName(bot.Team), TeamName(bot.Team), dungeon.Name, uint32(factionWeight));
+
         if (bot.Level < dungeon.MinLevel || bot.Level > dungeon.MaxLevel)
             handler->PSendSysMessage("Warning: {} is level {}, outside {} range {}-{}.", bot.Name, uint32(bot.Level), dungeon.Name, uint32(dungeon.MinLevel), uint32(dungeon.MaxLevel));
 
@@ -2499,7 +3900,23 @@ namespace PlayerbotDungeonSim
         if (staged.size() >= dungeon.GroupSize)
         {
             std::vector<BotCandidate> group(staged.begin(), staged.begin() + dungeon.GroupSize);
-            if (StartGmLiveRun(handler, dungeon, group))
+            std::unordered_set<uint32> seen;
+            group.erase(std::remove_if(group.begin(), group.end(), [&](BotCandidate const& b)
+            {
+                if (seen.find(b.GuidLow) != seen.end())
+                    return true;
+                seen.insert(b.GuidLow);
+                return false;
+            }), group.end());
+
+            if (group.size() < dungeon.GroupSize)
+            {
+                handler->PSendSysMessage("DungeonSim: staged {} has duplicate bot entries; removed duplicates, now {}/{}. Stage another bot.", dungeon.Name, uint32(group.size()), uint32(dungeon.GroupSize));
+                staged = group;
+                return true;
+            }
+
+            if (StartGmRun(handler, dungeon, group, ConfiguredRunMode))
                 staged.erase(staged.begin(), staged.begin() + dungeon.GroupSize);
         }
 
@@ -2573,6 +3990,413 @@ namespace PlayerbotDungeonSim
         return true;
     }
 
+
+    static bool CommandWaypoint(ChatHandler* handler, std::string args)
+    {
+        std::string action = LowerCopy(PopFirstToken(args));
+        std::string instanceToken = PopFirstToken(args);
+
+        if (action.empty() || instanceToken.empty())
+        {
+            handler->PSendSysMessage("Usage: .dng-sim wp add|list|del|clear <INSTANCE> [ORDER] [LABEL]");
+            handler->PSendSysMessage("Example: stand in WC, then .dng-sim wp add WC 1 first_pull");
+            return true;
+        }
+
+        DungeonTemplate dungeon;
+        if (!LoadDungeonTemplateByNameOrId(instanceToken, dungeon))
+        {
+            handler->PSendSysMessage("DungeonSim: unknown dungeon `{}`.", instanceToken);
+            return true;
+        }
+
+        if (action == "list")
+        {
+            QueryResult result = WorldDatabase.Query(
+                "SELECT step_order, map_id, position_x, position_y, position_z, orientation, label, enabled "
+                "FROM playerbot_dungeon_waypoint WHERE dungeon_template_id = {} ORDER BY step_order ASC",
+                dungeon.Id);
+
+            handler->PSendSysMessage("DungeonSim waypoints for {}:", dungeon.Name);
+            if (!result)
+            {
+                handler->PSendSysMessage("  none");
+                return true;
+            }
+
+            do
+            {
+                Field* f = result->Fetch();
+                handler->PSendSysMessage("  #{} map={} x={} y={} z={} o={} label='{}' enabled={}",
+                    f[0].Get<uint32>(), f[1].Get<uint32>(), f[2].Get<float>(), f[3].Get<float>(), f[4].Get<float>(), f[5].Get<float>(), f[6].Get<std::string>(), f[7].Get<uint8>());
+            } while (result->NextRow());
+            return true;
+        }
+
+        if (action == "clear")
+        {
+            WorldDatabase.Execute("DELETE FROM playerbot_dungeon_waypoint WHERE dungeon_template_id = {}", dungeon.Id);
+            handler->PSendSysMessage("DungeonSim: cleared all waypoints for {}.", dungeon.Name);
+            return true;
+        }
+
+        if (action == "del" || action == "delete" || action == "rm")
+        {
+            std::string orderText = PopFirstToken(args);
+            if (!IsUnsignedNumber(orderText))
+            {
+                handler->PSendSysMessage("Usage: .dng-sim wp del <INSTANCE> <ORDER>");
+                return true;
+            }
+            uint32 order = uint32(std::stoul(orderText));
+            WorldDatabase.Execute("DELETE FROM playerbot_dungeon_waypoint WHERE dungeon_template_id = {} AND step_order = {}", dungeon.Id, order);
+            handler->PSendSysMessage("DungeonSim: removed waypoint #{} for {}.", order, dungeon.Name);
+            return true;
+        }
+
+        if (action == "add")
+        {
+            std::string orderText = PopFirstToken(args);
+            if (!IsUnsignedNumber(orderText))
+            {
+                handler->PSendSysMessage("Usage: .dng-sim wp add <INSTANCE> <ORDER> [LABEL]");
+                return true;
+            }
+
+            Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+            if (!player)
+            {
+                handler->PSendSysMessage("Waypoint add must be used in-game by a GM player.");
+                return true;
+            }
+
+            uint32 order = uint32(std::stoul(orderText));
+            std::string label = TrimCopy(args);
+            if (label.empty())
+                label = "step_" + std::to_string(order);
+            WorldDatabase.EscapeString(label);
+
+            WorldDatabase.Execute(
+                "INSERT INTO playerbot_dungeon_waypoint "
+                "(dungeon_template_id, step_order, map_id, position_x, position_y, position_z, orientation, label, enabled) "
+                "VALUES ({},{},{},{},{},{},{},'{}',1) "
+                "ON DUPLICATE KEY UPDATE map_id=VALUES(map_id), position_x=VALUES(position_x), position_y=VALUES(position_y), position_z=VALUES(position_z), orientation=VALUES(orientation), label=VALUES(label), enabled=1",
+                dungeon.Id, order, player->GetMapId(), player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(), player->GetOrientation(), label);
+
+            handler->PSendSysMessage("DungeonSim: saved waypoint #{} for {} at map={} x={} y={} z={}.",
+                order, dungeon.Name, player->GetMapId(), player->GetPositionX(), player->GetPositionY(), player->GetPositionZ());
+            return true;
+        }
+
+        handler->PSendSysMessage("DungeonSim: unknown waypoint action `{}`. Use add/list/del/clear.", action);
+        return true;
+    }
+
+    static bool CommandNativeStep(ChatHandler* handler, std::string args)
+    {
+        std::string action = LowerCopy(PopFirstToken(args));
+        std::string instanceToken = PopFirstToken(args);
+
+        if (action.empty() || instanceToken.empty())
+        {
+            handler->PSendSysMessage("Usage: .dng-sim step add|list|del|clear <INSTANCE> [ORDER] [TYPE] [WAIT] [LABEL]");
+            handler->PSendSysMessage("Types: move, teleport, wait, log, pull, anchor. Example: .dng-sim step add WC 10 move 15 first_pull");
+            return true;
+        }
+
+        DungeonTemplate dungeon;
+        if (!LoadDungeonTemplateByNameOrId(instanceToken, dungeon))
+        {
+            handler->PSendSysMessage("DungeonSim: unknown dungeon `{}`.", instanceToken);
+            return true;
+        }
+
+        if (action == "list")
+        {
+            QueryResult result = WorldDatabase.Query(
+                "SELECT step_order, step_type, map_id, position_x, position_y, position_z, orientation, wait_seconds, label, enabled "
+                "FROM playerbot_dungeon_event_step WHERE dungeon_template_id = {} ORDER BY step_order ASC",
+                dungeon.Id);
+
+            handler->PSendSysMessage("DungeonSim native event steps for {}:", dungeon.Name);
+            if (!result)
+            {
+                handler->PSendSysMessage("  none");
+                return true;
+            }
+
+            do
+            {
+                Field* f = result->Fetch();
+                handler->PSendSysMessage("  #{} type={} wait={} map={} x={} y={} z={} o={} label='{}' enabled={}",
+                    f[0].Get<uint32>(), f[1].Get<std::string>(), f[7].Get<uint32>(), f[2].Get<uint32>(), f[3].Get<float>(), f[4].Get<float>(), f[5].Get<float>(), f[6].Get<float>(), f[8].Get<std::string>(), f[9].Get<uint8>());
+            } while (result->NextRow());
+            return true;
+        }
+
+        if (action == "clear")
+        {
+            WorldDatabase.Execute("DELETE FROM playerbot_dungeon_event_step WHERE dungeon_template_id = {}", dungeon.Id);
+            handler->PSendSysMessage("DungeonSim: cleared all native event steps for {}.", dungeon.Name);
+            return true;
+        }
+
+        if (action == "del" || action == "delete" || action == "rm")
+        {
+            std::string orderText = PopFirstToken(args);
+            if (!IsUnsignedNumber(orderText))
+            {
+                handler->PSendSysMessage("Usage: .dng-sim step del <INSTANCE> <ORDER>");
+                return true;
+            }
+            uint32 order = uint32(std::stoul(orderText));
+            WorldDatabase.Execute("DELETE FROM playerbot_dungeon_event_step WHERE dungeon_template_id = {} AND step_order = {}", dungeon.Id, order);
+            handler->PSendSysMessage("DungeonSim: removed native step #{} for {}.", order, dungeon.Name);
+            return true;
+        }
+
+        if (action == "add")
+        {
+            std::string orderText = PopFirstToken(args);
+            std::string typeText = PopFirstToken(args);
+            std::string waitText = PopFirstToken(args);
+
+            if (!IsUnsignedNumber(orderText) || typeText.empty())
+            {
+                handler->PSendSysMessage("Usage: .dng-sim step add <INSTANCE> <ORDER> <TYPE> [WAIT_SECONDS] [LABEL]");
+                return true;
+            }
+
+            Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+            if (!player)
+            {
+                handler->PSendSysMessage("Native step add must be used in-game by a GM player.");
+                return true;
+            }
+
+            uint32 order = uint32(std::stoul(orderText));
+            std::string type = NormalizeNativeStepType(typeText);
+            uint32 waitSeconds = 0;
+            if (IsUnsignedNumber(waitText))
+                waitSeconds = uint32(std::stoul(waitText));
+            else if (!waitText.empty())
+                args = waitText + " " + args;
+
+            std::string label = TrimCopy(args);
+            if (label.empty())
+                label = type + "_" + std::to_string(order);
+            WorldDatabase.EscapeString(label);
+            WorldDatabase.EscapeString(type);
+
+            WorldDatabase.Execute(
+                "INSERT INTO playerbot_dungeon_event_step "
+                "(dungeon_template_id, step_order, step_type, map_id, position_x, position_y, position_z, orientation, wait_seconds, label, enabled) "
+                "VALUES ({},{},'{}',{},{},{},{},{},{},'{}',1) "
+                "ON DUPLICATE KEY UPDATE step_type=VALUES(step_type), map_id=VALUES(map_id), position_x=VALUES(position_x), position_y=VALUES(position_y), position_z=VALUES(position_z), orientation=VALUES(orientation), wait_seconds=VALUES(wait_seconds), label=VALUES(label), enabled=1",
+                dungeon.Id, order, type, player->GetMapId(), player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(), player->GetOrientation(), waitSeconds, label);
+
+            handler->PSendSysMessage("DungeonSim: saved native step #{} type={} wait={} for {} at map={} x={} y={} z={}.",
+                order, type, waitSeconds, dungeon.Name, player->GetMapId(), player->GetPositionX(), player->GetPositionY(), player->GetPositionZ());
+            return true;
+        }
+
+        handler->PSendSysMessage("DungeonSim: unknown native step action `{}`. Use add/list/del/clear.", action);
+        return true;
+    }
+
+    static bool CommandMode(ChatHandler* handler, std::string const& rest)
+    {
+        std::string token = TrimCopy(rest);
+        bool matched = false;
+        RunExecutionMode parsed = ParseRunModeToken(token, ConfiguredRunMode, &matched);
+        if (token.empty() || !matched)
+        {
+            handler->PSendSysMessage("DungeonSim mode is {}. Config key: PlayerbotDungeonSim.RunMode = SIM or REAL.", RunModeText(ConfiguredRunMode));
+            handler->PSendSysMessage("SIM  = timed dungeon society run: form group, optional one-shot teleport, resolve bosses/loot by simulation.");
+            handler->PSendSysMessage("REAL = live online bot run: require movable bots, create real group, teleport in, execute native route/event steps.");
+            handler->PSendSysMessage("For one GM run use: .dng-sim create sim DM  or  .dng-sim create real WC");
+            return true;
+        }
+
+        handler->PSendSysMessage("DungeonSim parsed mode `{}` as {}. This command does not rewrite worldserver.conf; set PlayerbotDungeonSim.RunMode to make it persistent.", token, RunModeText(parsed));
+        return true;
+    }
+
+
+    static uint64 ParseOptionalRunId(std::string const& rest)
+    {
+        std::string token = TrimCopy(rest);
+        if (!token.empty() && IsUnsignedNumber(token))
+            return uint64(std::stoull(token));
+
+        QueryResult active = CharacterDatabase.Query("SELECT id FROM playerbot_dungeon_run WHERE state IN (1,4) ORDER BY ends_at ASC LIMIT 1");
+        if (!active)
+            return 0;
+
+        return active->Fetch()[0].Get<uint64>();
+    }
+
+    static std::string RunModeLabelFromState(uint8 state)
+    {
+        if (state == uint8(RUN_REAL_ATTEMPT))
+            return "REAL";
+        if (state == uint8(RUN_ACTIVE))
+            return "SIM";
+        return "state" + std::to_string(uint32(state));
+    }
+
+    static bool CommandWhere(ChatHandler* handler, std::string const& rest)
+    {
+        if (!handler)
+            return false;
+
+        uint64 runId = ParseOptionalRunId(rest);
+        if (!runId)
+        {
+            handler->PSendSysMessage("DungeonSim: no active run found. Usage: .dng-sim where [RUN_ID]");
+            return true;
+        }
+
+        QueryResult run = CharacterDatabase.Query(
+            "SELECT r.id, r.dungeon_template_id, r.team, r.state, r.online_members_moved, r.entrance_map, r.entrance_x, r.entrance_y, r.entrance_z, r.entrance_o "
+            "FROM playerbot_dungeon_run r WHERE r.id = {} LIMIT 1", runId);
+        if (!run)
+        {
+            handler->PSendSysMessage("DungeonSim: run #{} not found.", runId);
+            return true;
+        }
+
+        Field* rf = run->Fetch();
+        uint32 dungeonId = rf[1].Get<uint32>();
+        uint8 team = rf[2].Get<uint8>();
+        uint8 state = rf[3].Get<uint8>();
+        uint32 moved = rf[4].Get<uint32>();
+        uint32 entranceMap = rf[5].Get<uint32>();
+        float entranceX = rf[6].Get<float>();
+        float entranceY = rf[7].Get<float>();
+        float entranceZ = rf[8].Get<float>();
+
+        handler->PSendSysMessage("DungeonSim run #{} {} {} {} moved={} storedDest map={} x={} y={} z={}",
+            runId, RunModeLabelFromState(state), TeamName(team), GetDungeonTemplateName(dungeonId), moved, entranceMap, entranceX, entranceY, entranceZ);
+
+        QueryResult members = CharacterDatabase.Query(
+            "SELECT DISTINCT rm.guid, c.name, c.level, c.class, rm.role, COALESCE(c.online,0), c.map, c.position_x, c.position_y, c.position_z, c.zone "
+            "FROM playerbot_dungeon_run_member rm "
+            "LEFT JOIN characters c ON c.guid = rm.guid "
+            "WHERE rm.run_id = {} ORDER BY rm.role ASC, c.name ASC", runId);
+
+        if (!members)
+        {
+            handler->PSendSysMessage("  no members recorded");
+            return true;
+        }
+
+        do
+        {
+            Field* f = members->Fetch();
+            uint32 guid = f[0].Get<uint32>();
+            std::string name = f[1].Get<std::string>();
+            uint8 level = f[2].Get<uint8>();
+            uint8 cls = f[3].Get<uint8>();
+            uint8 role = f[4].Get<uint8>();
+            bool dbOnline = f[5].Get<uint8>() != 0;
+            uint32 dbMap = f[6].Get<uint32>();
+            float dbX = f[7].Get<float>();
+            float dbY = f[8].Get<float>();
+            float dbZ = f[9].Get<float>();
+            uint32 dbZone = f[10].Get<uint32>();
+
+            Player* player = FindOnlinePlayer(guid);
+            if (player)
+            {
+                handler->PSendSysMessage("  {} guid={} lvl={} class={} role={} dbOnline={} LIVE map={} zone={} x={} y={} z={} group={} teleporting={}",
+                    name, guid, uint32(level), uint32(cls), RoleText(Role(role)), dbOnline ? 1 : 0,
+                    player->GetMapId(), player->GetZoneId(), player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(),
+                    player->GetGroup() ? 1 : 0, player->IsBeingTeleported() ? 1 : 0);
+            }
+            else
+            {
+                handler->PSendSysMessage("  {} guid={} lvl={} class={} role={} dbOnline={} OFFLINE/NO_OBJECT dbMap={} dbZone={} x={} y={} z={}",
+                    name, guid, uint32(level), uint32(cls), RoleText(Role(role)), dbOnline ? 1 : 0, dbMap, dbZone, dbX, dbY, dbZ);
+            }
+        } while (members->NextRow());
+
+        return true;
+    }
+
+    static bool CommandObserve(ChatHandler* handler, std::string const& rest)
+    {
+        if (!handler || !handler->GetSession() || !handler->GetSession()->GetPlayer())
+            return false;
+
+        Player* gm = handler->GetSession()->GetPlayer();
+        uint64 runId = ParseOptionalRunId(rest);
+        if (!runId)
+        {
+            handler->PSendSysMessage("DungeonSim: no active run found. Usage: .dng-sim observe [RUN_ID]");
+            return true;
+        }
+
+        QueryResult members = CharacterDatabase.Query(
+            "SELECT DISTINCT rm.guid, c.name, c.account, rm.role "
+            "FROM playerbot_dungeon_run_member rm "
+            "LEFT JOIN characters c ON c.guid = rm.guid "
+            "WHERE rm.run_id = {} ORDER BY CASE WHEN rm.role = 1 THEN 0 ELSE 1 END, c.name ASC", runId);
+
+        if (!members)
+        {
+            handler->PSendSysMessage("DungeonSim: run #{} has no members.", runId);
+            return true;
+        }
+
+        Player* target = nullptr;
+        std::string targetName;
+        do
+        {
+            Field* f = members->Fetch();
+            uint32 guid = f[0].Get<uint32>();
+            std::string name = f[1].Get<std::string>();
+            uint32 accountId = f[2].Get<uint32>();
+            BotCandidate b;
+            b.GuidLow = guid;
+            b.Name = name;
+            b.AccountId = accountId;
+
+            Player* candidate = FindOnlinePlayer(guid);
+            if (IsBotCandidateSafeToMove(candidate, b))
+            {
+                target = candidate;
+                targetName = name;
+                break;
+            }
+        } while (members->NextRow());
+
+        if (!target)
+        {
+            handler->PSendSysMessage("DungeonSim: no online/movable bot found for run #{}.", runId);
+            return true;
+        }
+
+        if (target->GetGroup() && !gm->GetGroup())
+        {
+            target->GetGroup()->AddMember(gm);
+            handler->PSendSysMessage("DungeonSim: temporarily joined you to {}'s group so the instance copy should match.", targetName);
+        }
+        else if (target->GetGroup() && gm->GetGroup() && gm->GetGroup() != target->GetGroup())
+        {
+            handler->PSendSysMessage("DungeonSim: you are already in a different group; teleporting anyway may put you in a different instance copy.");
+        }
+
+        gm->TeleportTo(target->GetMapId(), target->GetPositionX() + 2.0f, target->GetPositionY() + 2.0f, target->GetPositionZ(), target->GetOrientation());
+        handler->PSendSysMessage("DungeonSim: observing run #{} near {} at map={} x={} y={} z={}.",
+            runId, targetName, target->GetMapId(), target->GetPositionX(), target->GetPositionY(), target->GetPositionZ());
+
+        AuditLog("OBSERVE", "GM " + gm->GetName() + " observing run #" + std::to_string(runId) + " near " + targetName +
+            " map=" + std::to_string(target->GetMapId()) + " x=" + std::to_string(target->GetPositionX()) +
+            " y=" + std::to_string(target->GetPositionY()) + " z=" + std::to_string(target->GetPositionZ()));
+        return true;
+    }
+
     static bool HandleGmDngSimCommand(ChatHandler* handler, std::string args)
     {
         if (!handler)
@@ -2586,10 +4410,16 @@ namespace PlayerbotDungeonSim
         if (sub.empty() || sub == "help")
         {
             handler->PSendSysMessage("DungeonSim GM commands:");
-            handler->PSendSysMessage(".dng-sim create <INSTANCE> - auto-build an online bot group and start live run");
+            handler->PSendSysMessage(".dng-sim create [sim|real] <INSTANCE> - auto-build a bot group and start a SIM or REAL run");
+            handler->PSendSysMessage("Common aliases: RFC, WC, DM, SFK, BFD, Stocks, Gnomer, RFK, RFD, SMGY/SMLib/SMArm/SMCath, ZF, Mara, ST, BRD, LBRS, UBRS, DME/DMW/DMN, Scholo, Strat, MC, Ony.");
             handler->PSendSysMessage(".dng-sim inv <INSTANCE> <BOTNAME> - stage named bot; starts when group is full");
             handler->PSendSysMessage(".dng-sim rmv <INSTANCE> <BOTNAME> - remove named bot from staged group");
             handler->PSendSysMessage(".dng-sim wipe <INSTANCE> - clear staged group and mark active runs abandoned");
+            handler->PSendSysMessage(".dng-sim mode - explain current SIM/REAL mode");
+            handler->PSendSysMessage(".dng-sim where [RUN_ID] - list exact member positions for an active run");
+            handler->PSendSysMessage(".dng-sim observe [RUN_ID] - GM teleport near an online run member, joining their group when possible");
+            handler->PSendSysMessage(".dng-sim wp add|list|del|clear <INSTANCE> [ORDER] [LABEL] - record/tune in-instance teleport waypoints from your GM position");
+            handler->PSendSysMessage(".dng-sim step add|list|del|clear <INSTANCE> [ORDER] [TYPE] [WAIT] [LABEL] - record native route/event steps");
             return true;
         }
 
@@ -2601,6 +4431,16 @@ namespace PlayerbotDungeonSim
             return CommandRemove(handler, args);
         if (sub == "wipe")
             return CommandWipe(handler, args);
+        if (sub == "mode")
+            return CommandMode(handler, args);
+        if (sub == "where" || sub == "loc" || sub == "location")
+            return CommandWhere(handler, args);
+        if (sub == "observe" || sub == "watch" || sub == "goto")
+            return CommandObserve(handler, args);
+        if (sub == "wp" || sub == "waypoint" || sub == "waypoints")
+            return CommandWaypoint(handler, args);
+        if (sub == "step" || sub == "event" || sub == "native")
+            return CommandNativeStep(handler, args);
 
         handler->PSendSysMessage("DungeonSim: unknown subcommand `{}`. Use .dng-sim help.", sub);
         return true;
@@ -2626,13 +4466,71 @@ namespace PlayerbotDungeonSim
                 continue;
 
             DungeonTemplate dungeon = dungeons[urand(0, dungeons.size() - 1)];
-            std::vector<BotCandidate> candidates = LoadEligibleBots(team, dungeon.MinLevel, dungeon.MaxLevel, dungeon.GroupSize * 10);
             std::vector<BotCandidate> group;
 
-            if (BuildGroup(candidates, dungeon, group))
-                CreateRun(dungeon, group);
+            RunExecutionMode selectedMode = ConfiguredRunMode;
+            if (HybridSimReal)
+                selectedMode = (urand(1, 100) <= std::min<uint32>(100, HybridRealChance)) ? RUN_MODE_REAL : RUN_MODE_SIM;
+
+            auto selectGroupForMode = [&](RunExecutionMode modeToUse, std::vector<BotCandidate>& outGroup, uint8& outWeight, uint32& outOnline) -> bool
+            {
+                outGroup.clear();
+                outWeight = 0;
+                outOnline = 0;
+
+                if (AutoUseGmGroupSelection)
+                    return SelectBestBotGroupForDungeon(dungeon, modeToUse, outGroup, outWeight, outOnline);
+
+                std::vector<BotCandidate> candidates = LoadEligibleBots(team, dungeon.MinLevel, dungeon.MaxLevel, dungeon.GroupSize * 10);
+                if (modeToUse == RUN_MODE_REAL && RequireOnlineBotsForRun)
+                {
+                    candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [](BotCandidate const& b)
+                    {
+                        return !IsBotCandidateSafeToMove(FindOnlinePlayer(b.GuidLow), b);
+                    }), candidates.end());
+                }
+
+                bool ok = BuildGroup(candidates, dungeon, outGroup);
+                outWeight = outGroup.empty() ? 0 : DungeonFactionWeight(dungeon, outGroup.front().Team);
+                outOnline = outGroup.empty() ? 0 : CountOnlineMovableGroupMembers(outGroup);
+                return ok;
+            };
+
+            uint8 selectedWeight = 0;
+            uint32 selectedOnline = 0;
+            if (!selectGroupForMode(selectedMode, group, selectedWeight, selectedOnline))
+            {
+                if (HybridSimReal && selectedMode == RUN_MODE_REAL && HybridRealFallbackToSim)
+                {
+                    DebugLog("Hybrid pass found no REAL group for " + dungeon.Name + "; falling back to SIM group selection.");
+                    selectedMode = RUN_MODE_SIM;
+                    if (!selectGroupForMode(selectedMode, group, selectedWeight, selectedOnline))
+                    {
+                        DebugLog("Auto organic pass found no SIM group for " + dungeon.Name + " after REAL fallback.");
+                        continue;
+                    }
+                }
+                else
+                {
+                    DebugLog("Auto organic pass found no " + RunModeText(selectedMode) + " group for " + dungeon.Name +
+                        (AutoUseGmGroupSelection ? " using GM-equivalent selection." : "."));
+                    continue;
+                }
+            }
+
+            if (AutoUseGmGroupSelection)
+            {
+                DebugLog("Auto organic selected " + TeamName(group.front().Team) + " group for " + dungeon.Name +
+                    " in " + RunModeText(selectedMode) + " mode, factionWeight=" + std::to_string(uint32(selectedWeight)) +
+                    " online=" + std::to_string(selectedOnline) + ".");
+            }
+
+            if (selectedMode == RUN_MODE_REAL)
+                MaybeReservePlayerSlot(group, dungeon);
+            CreateRun(dungeon, group, selectedMode);
         }
     }
+
 }
 
 class PlayerbotDungeonSimWorldScript : public WorldScript
@@ -2645,6 +4543,11 @@ public:
         using namespace PlayerbotDungeonSim;
         Enable = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.Enable", true);
         Debug = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.Debug", false);
+        AuditFileLog = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.FileLog", true);
+        AuditFilePath = sConfigMgr->GetOption<std::string>("PlayerbotDungeonSim.FileLogPath", "Logs/playerbot_dungeon_sim.log");
+        AuditFileMovement = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.FileLogMovement", true);
+        AuditFileLoot = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.FileLogLoot", true);
+        AuditFileMembers = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.FileLogMembers", true);
         TickSeconds = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.TickSeconds", 60);
         MinBotLevel = sConfigMgr->GetOption<uint8>("PlayerbotDungeonSim.MinBotLevel", 10);
         MaxGroupsPerTick = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.MaxGroupsPerTick", 2);
@@ -2654,11 +4557,29 @@ public:
         MinDurationMinutes = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.MinDurationMinutes", 20);
         MaxDurationMinutes = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.MaxDurationMinutes", 45);
         RealRunFirst = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.RealRunFirst", true);
+        ConfiguredRunMode = ParseRunModeToken(sConfigMgr->GetOption<std::string>("PlayerbotDungeonSim.RunMode", RealRunFirst ? "REAL" : "SIM"), RealRunFirst ? RUN_MODE_REAL : RUN_MODE_SIM);
         SimFallback = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.SimFallback", true);
+        HybridSimReal = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.HybridSimReal", false);
+        HybridRealChance = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.HybridRealChance", 20);
+        HybridRealFallbackToSim = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.HybridRealFallbackToSim", true);
+        SimMinimumBossKillsForLoot = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.SimMinimumBossKillsForLoot", 1);
+        SimMinimumBossKillsApplyToRaids = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.SimMinimumBossKillsApplyToRaids", false);
         TeleportOnlineMembers = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.TeleportOnlineMembers", true);
         CreateRealGroups = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.CreateRealGroups", true);
         TeleportOnlyIfOnline = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.TeleportOnlyIfOnline", false);
         TeleportInsideInstance = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.TeleportInsideInstance", true);
+        ProgressiveTeleport = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.ProgressiveTeleport", false);
+        ProgressiveTeleportStepSeconds = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.ProgressiveTeleportStepSeconds", 20);
+        InstanceWaypointTeleport = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.InstanceWaypointTeleport", true);
+        InstanceWaypointStepSeconds = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.InstanceWaypointStepSeconds", 15);
+        NativeEventSteps = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.NativeEventSteps", true);
+        NativeEventStepSeconds = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.NativeEventStepSeconds", 20);
+        NativeEventMoveInsteadTeleport = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.NativeEventMoveInsteadTeleport", false);
+        NativeEventLeaderOnly = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.NativeEventLeaderOnly", true);
+        NativeFollowerLeash = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.NativeFollowerLeash", true);
+        NativeFollowerLeashSeconds = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.NativeFollowerLeashSeconds", 5);
+        NativeFollowerLeashDistance = sConfigMgr->GetOption<float>("PlayerbotDungeonSim.NativeFollowerLeashDistance", 18.0f);
+        NativeFollowerHardTeleportDistance = sConfigMgr->GetOption<float>("PlayerbotDungeonSim.NativeFollowerHardTeleportDistance", 80.0f);
         MinOnlineMembersForLiveRun = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.MinOnlineMembersForLiveRun", 1);
         RequireOnlineBotsForRun = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.RequireOnlineBotsForRun", false);
         CleanupOfflineRunsWhenLiveOnly = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.CleanupOfflineRunsWhenLiveOnly", true);
@@ -2674,6 +4595,14 @@ public:
         EquipUsableLootOnline = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.EquipUsableLootOnline", false);
         DeliverPendingLootOnLogin = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.DeliverPendingLootOnLogin", true);
         MaxPendingDeliveriesPerLogin = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.MaxPendingDeliveriesPerLogin", 12);
+        AwardXp = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.AwardXp", true);
+        GiveXpToOnlinePlayers = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.GiveXpToOnlinePlayers", true);
+        DeliverPendingXpOnLogin = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.DeliverPendingXpOnLogin", true);
+        XpPercentOfLevel = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.XpPercentOfLevel", 25);
+        XpScaleByBossKills = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.XpScaleByBossKills", true);
+        XpMinimumPercentOnAnyKill = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.XpMinimumPercentOnAnyKill", 5);
+        XpLevelCap = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.XpLevelCap", 0);
+        MaxPendingXpDeliveriesPerLogin = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.MaxPendingXpDeliveriesPerLogin", 12);
         EquipUpgradesOnDelivery = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.EquipUpgradesOnDelivery", false);
         OnlyEquipBetterItems = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.OnlyEquipBetterItems", true);
         InviteRealPlayers = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.InviteRealPlayers", false);
@@ -2716,6 +4645,14 @@ public:
         OrganicLfgActing = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.OrganicLfgActing", true);
         OrganicLfgChance = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.OrganicLfgChance", 85);
         RestrictOrganicCitiesToClassic = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.RestrictOrganicCitiesToClassic", true);
+        StructuredLfgSimulation = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.StructuredLfgSimulation", true);
+        StructuredLfgChance = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.StructuredLfgChance", 100);
+        StructuredLfgTradeChance = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.StructuredLfgTradeChance", 20);
+        AutoUseGmGroupSelection = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.AutoUseGmGroupSelection", true);
+        ReserveRealPlayerSlotChance = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.ReserveRealPlayerSlotChance", 0);
+        PlayerWhisperJoin = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.PlayerWhisperJoin", true);
+        PlayerWhisperJoinRequiresRole = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.PlayerWhisperJoinRequiresRole", true);
+        PlayerWhisperJoinAllowGm = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.PlayerWhisperJoinAllowGm", true);
         TradeChatSimulation = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.TradeChatSimulation", true);
         TradeChatChance = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.TradeChatChance", 20);
         TradeChatEveryTicks = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.TradeChatEveryTicks", 3);
@@ -2728,6 +4665,12 @@ public:
             LootPerBossMin = 1;
         if (MaxPendingDeliveriesPerLogin == 0)
             MaxPendingDeliveriesPerLogin = 1;
+        if (MaxPendingXpDeliveriesPerLogin == 0)
+            MaxPendingXpDeliveriesPerLogin = 1;
+        XpPercentOfLevel = std::min<uint32>(XpPercentOfLevel, 100);
+        XpMinimumPercentOnAnyKill = std::min<uint32>(XpMinimumPercentOnAnyKill, XpPercentOfLevel);
+        if (XpLevelCap > 80)
+            XpLevelCap = 80;
         RaidChanceAtCap = std::min<uint32>(RaidChanceAtCap, 100);
         GuildChatChance = std::min<uint32>(GuildChatChance, 100);
         GeneralChatChance = std::min<uint32>(GeneralChatChance, 100);
@@ -2735,9 +4678,26 @@ public:
         SimulatedBotDeclineChance = std::min<uint32>(SimulatedBotDeclineChance, 100);
         SimulatedBotDeclineMaxPerGroup = std::min<uint32>(SimulatedBotDeclineMaxPerGroup, 5);
         OrganicLfgChance = std::min<uint32>(OrganicLfgChance, 100);
+        StructuredLfgChance = std::min<uint32>(StructuredLfgChance, 100);
+        StructuredLfgTradeChance = std::min<uint32>(StructuredLfgTradeChance, 100);
+        ReserveRealPlayerSlotChance = std::min<uint32>(ReserveRealPlayerSlotChance, 100);
         TradeChatChance = std::min<uint32>(TradeChatChance, 100);
         if (TradeChatEveryTicks == 0)
             TradeChatEveryTicks = 1;
+        if (ProgressiveTeleportStepSeconds == 0)
+            ProgressiveTeleportStepSeconds = 1;
+        if (InstanceWaypointStepSeconds == 0)
+            InstanceWaypointStepSeconds = 1;
+        if (HybridRealChance > 100)
+            HybridRealChance = 100;
+        if (NativeEventStepSeconds == 0)
+            NativeEventStepSeconds = 1;
+        if (NativeFollowerLeashSeconds == 0)
+            NativeFollowerLeashSeconds = 1;
+        if (NativeFollowerLeashDistance < 3.0f)
+            NativeFollowerLeashDistance = 3.0f;
+        if (NativeFollowerHardTeleportDistance > 0.0f && NativeFollowerHardTeleportDistance < NativeFollowerLeashDistance)
+            NativeFollowerHardTeleportDistance = NativeFollowerLeashDistance;
         MinOnlineMembersForLiveRun = std::min<uint32>(MinOnlineMembersForLiveRun, 40);
         LiveDebugMaxRosterLines = std::min<uint32>(std::max<uint32>(LiveDebugMaxRosterLines, 1), 40);
         if (RaidMinServerLevelCap == 0)
@@ -2757,13 +4717,24 @@ public:
         if (Enable && !VerifyDatabaseSchema())
             Enable = false;
 
+        if (Enable)
+            LOG_INFO("module", "[PlayerbotDungeonSim] RunMode={} HybridSimReal={} HybridRealChance={} SimMinimumBossKillsForLoot={} (SIM=timed simulation/loot, REAL=live group + native route/event executor).", RunModeText(ConfiguredRunMode), HybridSimReal ? 1 : 0, HybridRealChance, SimMinimumBossKillsForLoot);
+
         if (Enable && !AllowOnlineCharacterTouch)
             LOG_INFO("module", "[PlayerbotDungeonSim] Safe mode: online character touching is disabled. No teleports, live group edits, or direct loot delivery will occur.");
         else if (Enable)
             LOG_INFO("module", "[PlayerbotDungeonSim] Live mode: online bot character touching is enabled. Prefix/range safety filter is active; only configured bot accounts may be moved or receive direct loot.");
 
-        if (Enable && RequireOnlineBotsForRun)
-            LOG_INFO("module", "[PlayerbotDungeonSim] Live-only mode: offline/fake dungeon starts are disabled; at least {} online/movable bot(s) required per run. cleanupOfflineRuns={} statusOnline={} preferOnlineCandidates={} liveDebugRoster={}", MinOnlineMembersForLiveRun, CleanupOfflineRunsWhenLiveOnly ? 1 : 0, StatusShowOnlineMembers ? 1 : 0, PreferOnlineCandidatesForLiveRuns ? 1 : 0, LiveDebugRoster ? 1 : 0);
+        if (Enable && ConfiguredRunMode == RUN_MODE_REAL && RequireOnlineBotsForRun)
+            LOG_INFO("module", "[PlayerbotDungeonSim] REAL live-only mode: offline/fake dungeon starts are disabled; at least {} online/movable bot(s) required per run. cleanupOfflineRuns={} statusOnline={} preferOnlineCandidates={} liveDebugRoster={}", MinOnlineMembersForLiveRun, CleanupOfflineRunsWhenLiveOnly ? 1 : 0, StatusShowOnlineMembers ? 1 : 0, PreferOnlineCandidatesForLiveRuns ? 1 : 0, LiveDebugRoster ? 1 : 0);
+
+        if (AuditFileLog)
+            AuditLog("CONFIG", "File logging enabled path='" + AuditFilePath + "' movement=" + std::to_string(AuditFileMovement ? 1 : 0) +
+                " loot=" + std::to_string(AuditFileLoot ? 1 : 0) + " members=" + std::to_string(AuditFileMembers ? 1 : 0) +
+                " runMode=" + RunModeText(ConfiguredRunMode) + " hybrid=" + std::to_string(HybridSimReal ? 1 : 0) + " hybridRealChance=" + std::to_string(HybridRealChance) +
+                " minLootBosses=" + std::to_string(SimMinimumBossKillsForLoot) + " awardXp=" + std::to_string(AwardXp ? 1 : 0) +
+                " xpPercent=" + std::to_string(XpPercentOfLevel) + " xpCap=" + std::to_string(GetEffectiveXpLevelCap()) +
+                " xpScaleByBosses=" + std::to_string(XpScaleByBossKills ? 1 : 0) + " enabled=" + std::to_string(Enable ? 1 : 0));
 
         _startupElapsedMs = 0;
         _startupDelayLogged = false;
@@ -2785,6 +4756,10 @@ public:
             }
             return;
         }
+
+        ProcessProgressiveTeleportQueue();
+        ProcessNativeEventQueue();
+        ProcessNativeFollowerLeashQueue();
 
         if (_timerMs <= diff)
         {
@@ -2818,7 +4793,8 @@ public:
         : PlayerScript("PlayerbotDungeonSimPlayerScript",
             {
                 PLAYERHOOK_ON_LOGIN,
-                PLAYERHOOK_CAN_PLAYER_USE_CHAT
+                PLAYERHOOK_CAN_PLAYER_USE_CHAT,
+                PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT
             })
     {
     }
@@ -2826,6 +4802,7 @@ public:
     void OnPlayerLogin(Player* player) override
     {
         PlayerbotDungeonSim::DeliverPendingLoot(player);
+        PlayerbotDungeonSim::DeliverPendingXp(player);
     }
 
     bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 language, std::string& msg) override
@@ -2846,6 +4823,17 @@ public:
             PlayerbotDungeonSim::HandleGmDngSimCommand(&handler, msg);
             return false;
         }
+
+        return true;
+    }
+
+    bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 language, std::string& msg, Player* receiver) override
+    {
+        (void)type;
+        (void)language;
+
+        if (PlayerbotDungeonSim::HandleBotWhisperJoin(player, receiver, msg))
+            return false;
 
         return true;
     }

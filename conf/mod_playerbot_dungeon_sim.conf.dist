@@ -3,27 +3,64 @@
 # mod-playerbot-dungeon-sim
 PlayerbotDungeonSim.Enable = 1
 PlayerbotDungeonSim.Debug = 1
+
+# Dedicated audit log. Path is relative to the worldserver working directory.
+# With the normal AzerothCore layout this writes to .\Logs\playerbot_dungeon_sim.log.
+PlayerbotDungeonSim.FileLog = 1
+PlayerbotDungeonSim.FileLogPath = Logs/playerbot_dungeon_sim.log
+PlayerbotDungeonSim.FileLogMovement = 1
+PlayerbotDungeonSim.FileLogLoot = 1
+PlayerbotDungeonSim.FileLogMembers = 1
+
 PlayerbotDungeonSim.TickSeconds = 60
 PlayerbotDungeonSim.MinBotLevel = 13
 PlayerbotDungeonSim.MaxGroupsPerTick = 1
 PlayerbotDungeonSim.PreferGuildGroups = 1
 PlayerbotDungeonSim.AllowPugs = 1
 PlayerbotDungeonSim.RequireFullGroup = 1
-PlayerbotDungeonSim.RealRunFirst = 1
+# Core execution mode.
+# SIM  = form a group, optionally teleport online members once, then timed simulation resolves boss kills/loot.
+# REAL = require live online/movable bots, create a real group, teleport in, then execute native route/event steps.
+PlayerbotDungeonSim.RunMode = SIM
+# Legacy compatibility: if RunMode is missing, RealRunFirst=1 behaves like REAL and 0 behaves like SIM.
+PlayerbotDungeonSim.RealRunFirst = 0
+
+# Hybrid mode is the recommended “alive world” setup:
+# most groups run in stable SIM mode for guaranteed dungeon society + loot progression,
+# while some groups become REAL live attempts when enough online/movable bots exist.
+PlayerbotDungeonSim.HybridSimReal = 1
+PlayerbotDungeonSim.HybridRealChance = 25
+PlayerbotDungeonSim.HybridRealFallbackToSim = 1
+
+# In SIM mode keep this 1 so timed runs award boss kills/loot.
+# In REAL mode keep this 1 if live attempts should still resolve with simulated boss kills/loot on the timer.
 PlayerbotDungeonSim.SimFallback = 1
+# Gear treadmill safety: non-raid runs that fully wipe still credit at least this many boss kills for loot.
+# Set 0 if you want failed runs to award no loot. Raids ignore this unless SimMinimumBossKillsApplyToRaids=1.
+PlayerbotDungeonSim.SimMinimumBossKillsForLoot = 1
+PlayerbotDungeonSim.SimMinimumBossKillsApplyToRaids = 0
 PlayerbotDungeonSim.MinDurationMinutes = 2
 PlayerbotDungeonSim.MaxDurationMinutes = 4
 PlayerbotDungeonSim.StuckTimeoutMinutes = 8
 PlayerbotDungeonSim.TeleportOnlineMembers = 1
 PlayerbotDungeonSim.CreateRealGroups = 1
-PlayerbotDungeonSim.TeleportOnlyIfOnline = 1
+PlayerbotDungeonSim.TeleportOnlyIfOnline = 0
 # When enabled, online bot members are teleported to the instance start found in areatrigger_teleport.
 # If no areatrigger is found for that dungeon, the module falls back to the outdoor entrance coords.
 PlayerbotDungeonSim.TeleportInsideInstance = 1
+# Optional live-test flavor: move bots through capital -> route waypoint(s) -> portal -> instance over time.
+# Good for watching them as GM. Disable for instant teleport.
+PlayerbotDungeonSim.ProgressiveTeleport = 0
+PlayerbotDungeonSim.ProgressiveTeleportStepSeconds = 20
+# After bots enter the instance, optionally move/warp them through saved internal waypoints.
+# This fixes dungeons like Wailing Caverns where bots spawn safely but do not naturally find the first mobs.
+# Add/tune waypoints in game with: .dng-sim wp add WC 1 first_pull
+PlayerbotDungeonSim.InstanceWaypointTeleport = 1
+PlayerbotDungeonSim.InstanceWaypointStepSeconds = 15
 # 0 = allow offline simulated runs too. 1-5 = require at least that many online/movable bots before a live attempt starts.
 # If 1, the module will NOT create fake/offline runs when no online/movable bots are found.
 # Use this for live teleport/loot testing. If 0, offline DB-only simulation is allowed.
-PlayerbotDungeonSim.RequireOnlineBotsForRun = 1
+PlayerbotDungeonSim.RequireOnlineBotsForRun = 0
 # When live-only is enabled, mark old active moved=0 fake/offline runs as abandoned so status only shows live attempts.
 PlayerbotDungeonSim.CleanupOfflineRunsWhenLiveOnly = 1
 # Adds online/movable counts to console STATUS rows.
@@ -33,7 +70,7 @@ PlayerbotDungeonSim.PreferOnlineCandidatesForLiveRuns = 1
 # Prints candidate/group online/object/movable diagnostics when live-only skips a run.
 PlayerbotDungeonSim.LiveDebugRoster = 1
 PlayerbotDungeonSim.LiveDebugMaxRosterLines = 5
-PlayerbotDungeonSim.MinOnlineMembersForLiveRun = 1
+PlayerbotDungeonSim.MinOnlineMembersForLiveRun = 5
 # Startup delay prevents DungeonSim from competing with Playerbots mass login/save activity.
 PlayerbotDungeonSim.StartupDelaySeconds = 180
 # Live test mode. 1 allows live bot group edits, bot teleports, and direct online loot delivery.
@@ -60,6 +97,19 @@ PlayerbotDungeonSim.MaxPendingDeliveriesPerLogin = 12
 PlayerbotDungeonSim.EquipUpgradesOnDelivery = 0
 # When equipping is enabled, avoid replacing sidegrades or worse items.
 PlayerbotDungeonSim.OnlyEquipBetterItems = 1
+
+# XP simulation
+# Full clears award this percent of the character's current level. With boss scaling on, partial runs award a proportional amount.
+PlayerbotDungeonSim.AwardXp = 1
+PlayerbotDungeonSim.XpPercentOfLevel = 25
+PlayerbotDungeonSim.XpScaleByBossKills = 1
+PlayerbotDungeonSim.XpMinimumPercentOnAnyKill = 5
+# 0 = use your server max player level. Set 40 while your world cap is 40, or 60 for vanilla endgame.
+PlayerbotDungeonSim.XpLevelCap = 0
+# Online bot winners get XP immediately via Player::GiveXP; offline awards are stored pending for login.
+PlayerbotDungeonSim.GiveXpToOnlinePlayers = 1
+PlayerbotDungeonSim.DeliverPendingXpOnLogin = 1
+PlayerbotDungeonSim.MaxPendingXpDeliveriesPerLogin = 12
 
 # Real player invite support
 # When enabled, eligible ungrouped real players can be asked to fill/assist a bot dungeon run.
@@ -144,3 +194,44 @@ PlayerbotDungeonSim.TradeChatSimulation = 1
 PlayerbotDungeonSim.TradeChatChance = 20
 # Only try trade flavor every N world ticks to avoid spam.
 PlayerbotDungeonSim.TradeChatEveryTicks = 3
+
+# Structured LFG / LFM dialogue simulation
+# Bots still form the group internally, but they act out the social layer first:
+# leader posts LFM, members answer LFG with tank/heal/dps/spec, and players may whisper a bot to join.
+PlayerbotDungeonSim.StructuredLfgSimulation = 1
+PlayerbotDungeonSim.StructuredLfgChance = 100
+# Chance that the leader also posts in TradeSim, like old city trade spam.
+PlayerbotDungeonSim.StructuredLfgTradeChance = 20
+
+# When enabled, automatic organic scheduler uses the same robust group picker as `.dng-sim create`:
+# checks both factions, honors faction weights like RFC Horde-only / DM mostly Alliance,
+# uses a larger candidate pool, and prefers online/movable bots for REAL mode.
+PlayerbotDungeonSim.AutoUseGmGroupSelection = 1
+# Chance to intentionally hold one DPS slot open for a real player whisper join.
+# Keep 0 during pure bot-only live teleport testing. Try 10-25 when testing organic player joins.
+PlayerbotDungeonSim.ReserveRealPlayerSlotChance = 0
+# Player can whisper an online bot in the forming/active group with: lfg dps, inv tank, heals, etc.
+PlayerbotDungeonSim.PlayerWhisperJoin = 1
+PlayerbotDungeonSim.PlayerWhisperJoinRequiresRole = 1
+# Helpful while testing as GM; set 0 later if you only want normal player joins.
+PlayerbotDungeonSim.PlayerWhisperJoinAllowGm = 1
+
+# Native route/event executor
+# Used by REAL mode. SIM mode does not use route/event movement; it only does timed simulation/loot.
+# This is the first native "DungeonClear-style" layer inside DungeonSim itself.
+# Steps are stored in world.playerbot_dungeon_event_step and can be recorded by standing at a spot and using:
+# .dng-sim step add WC 10 move 15 first_pull
+# Types: move, teleport, wait, log, pull, anchor.
+PlayerbotDungeonSim.NativeEventSteps = 1
+# Default seconds between native steps when a row does not specify wait_seconds.
+PlayerbotDungeonSim.NativeEventStepSeconds = 20
+# 0 = safer live test: teleport to each event/anchor. 1 = try MotionMaster MovePoint instead of teleport for move/pull/anchor steps.
+PlayerbotDungeonSim.NativeEventMoveInsteadTeleport = 0
+# Native REAL v2: the tank/leader drives move/pull/anchor steps. Followers are leashed to the leader.
+# This is closer to a real party than having every bot run every route command at once.
+PlayerbotDungeonSim.NativeEventLeaderOnly = 1
+PlayerbotDungeonSim.NativeFollowerLeash = 1
+PlayerbotDungeonSim.NativeFollowerLeashSeconds = 5
+PlayerbotDungeonSim.NativeFollowerLeashDistance = 18.0
+# 0 disables hard teleport catchup. 80 is a safety catchup for WC/SFK weird pathing or followers that fall behind.
+PlayerbotDungeonSim.NativeFollowerHardTeleportDistance = 80.0

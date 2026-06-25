@@ -106,3 +106,19 @@ INSERT INTO `playerbot_dungeon_boss_template` (`dungeon_template_id`,`boss_order
 (105,1,'The Prophet Skeram',15263),(105,2,'Bug Trio',15544),(105,3,'Battleguard Sartura',15516),(105,4,'Fankriss the Unyielding',15510),(105,5,'Viscidus',15299),(105,6,'Princess Huhuran',15509),(105,7,'Twin Emperors',15276),(105,8,'Ouro',15517),(105,9,'C''Thun',15727),
 (106,1,'Anub''Rekhan',15956),(106,2,'Grand Widow Faerlina',15953),(106,3,'Maexxna',15952),(106,4,'Noth the Plaguebringer',15954),(106,5,'Heigan the Unclean',15936),(106,6,'Loatheb',16011),(106,7,'Instructor Razuvious',16061),(106,8,'Gothik the Harvester',16060),(106,9,'The Four Horsemen',16063),(106,10,'Patchwerk',16028),(106,11,'Grobbulus',15931),(106,12,'Gluth',15932),(106,13,'Thaddius',15928),(106,14,'Sapphiron',15989),(106,15,'Kel''Thuzad',15990)
 ON DUPLICATE KEY UPDATE `boss_name`=VALUES(`boss_name`), `creature_entry`=VALUES(`creature_entry`);
+
+CREATE TABLE IF NOT EXISTS `playerbot_dungeon_waypoint` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `dungeon_template_id` INT UNSIGNED NOT NULL,
+  `step_order` SMALLINT UNSIGNED NOT NULL,
+  `map_id` SMALLINT UNSIGNED NOT NULL,
+  `position_x` FLOAT NOT NULL,
+  `position_y` FLOAT NOT NULL,
+  `position_z` FLOAT NOT NULL,
+  `orientation` FLOAT NOT NULL DEFAULT 0,
+  `label` VARCHAR(100) NOT NULL DEFAULT '',
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_dungeon_step` (`dungeon_template_id`,`step_order`),
+  KEY `idx_dungeon_enabled` (`dungeon_template_id`,`enabled`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
