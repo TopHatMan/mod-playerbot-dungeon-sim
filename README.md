@@ -352,3 +352,25 @@ members=5 online=1 movable=1 moved=1
 ```
 
 If it says `moved=0`, the run is not visually inside the dungeon.
+
+## Live bot visibility test notes
+
+If `RequireOnlineBotsForRun = 1`, DungeonSim now prefers `characters.online = 1` candidates when building the selected group. This prevents live tests from choosing five offline DB bots while a small number of Playerbots are actually online.
+
+Useful live debug settings:
+
+```ini
+PlayerbotDungeonSim.RequireOnlineBotsForRun = 1
+PlayerbotDungeonSim.PreferOnlineCandidatesForLiveRuns = 1
+PlayerbotDungeonSim.LiveDebugRoster = 1
+PlayerbotDungeonSim.LiveDebugMaxRosterLines = 5
+PlayerbotDungeonSim.StatusShowOnlineMembers = 1
+```
+
+The skip line means:
+
+```text
+online/movable=0, need 1
+```
+
+It found zero loaded/movable bot `Player` objects in the selected group. It only needs one because `MinOnlineMembersForLiveRun = 1`.

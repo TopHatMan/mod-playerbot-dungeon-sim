@@ -26,6 +26,11 @@ PlayerbotDungeonSim.RequireOnlineBotsForRun = 1
 PlayerbotDungeonSim.CleanupOfflineRunsWhenLiveOnly = 1
 # Adds online/movable counts to console STATUS rows.
 PlayerbotDungeonSim.StatusShowOnlineMembers = 1
+# Live-test helper: prefer DB-online characters when forming the selected group, so one online bot is not missed among hundreds of offline candidates.
+PlayerbotDungeonSim.PreferOnlineCandidatesForLiveRuns = 1
+# Prints candidate/group online/object/movable diagnostics when live-only skips a run.
+PlayerbotDungeonSim.LiveDebugRoster = 1
+PlayerbotDungeonSim.LiveDebugMaxRosterLines = 5
 PlayerbotDungeonSim.MinOnlineMembersForLiveRun = 1
 # Startup delay prevents DungeonSim from competing with Playerbots mass login/save activity.
 PlayerbotDungeonSim.StartupDelaySeconds = 180

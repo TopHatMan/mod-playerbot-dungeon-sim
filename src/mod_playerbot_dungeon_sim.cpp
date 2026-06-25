@@ -83,6 +83,8 @@ namespace PlayerbotDungeonSim
     struct BotCandidate
     {
         uint32 GuidLow = 0;
+        uint32 AccountId = 0;
+        bool DbOnline = false;
         std::string Name;
         uint8 Level = 1;
         uint8 Race = 0;
@@ -122,6 +124,9 @@ namespace PlayerbotDungeonSim
     static bool RequireOnlineBotsForRun;
     static bool CleanupOfflineRunsWhenLiveOnly;
     static bool StatusShowOnlineMembers;
+    static bool PreferOnlineCandidatesForLiveRuns;
+    static bool LiveDebugRoster;
+    static uint32 LiveDebugMaxRosterLines;
     static bool ManualTravelForPlayerJoinedRuns;
     static bool AllowOnlineCharacterTouch;
     static uint32 StartupDelaySeconds;
@@ -433,15 +438,20 @@ namespace PlayerbotDungeonSim
         std::vector<BotCandidate> out;
 
         // Bot safety filter is applied after row load so we can check auth.account.username via LoginDatabase.
-        QueryResult result = CharacterDatabase.Query(
-            "SELECT c.guid, c.name, c.level, c.race, c.class, COALESCE(g.guildid,0), c.account "
+        // In live-only testing, prefer characters that the characters table already marks online.
+        // This avoids selecting five random offline DB bots when only a small number of Playerbots are actually loaded.
+        uint32 rowLimit = (RequireOnlineBotsForRun && PreferOnlineCandidatesForLiveRuns) ? limit * 24 : limit * 8;
+        std::string order = (RequireOnlineBotsForRun && PreferOnlineCandidatesForLiveRuns) ? "c.online DESC, RAND()" : "RAND()";
+
+        QueryResult result = CharacterDatabase.Query(Acore::StringFormat(
+            "SELECT c.guid, c.name, c.level, c.race, c.class, COALESCE(g.guildid,0), c.account, c.online "
             "FROM characters c "
             "LEFT JOIN guild_member g ON g.guid = c.guid "
             "LEFT JOIN playerbot_dungeon_run_member rm ON rm.guid = c.guid "
             "LEFT JOIN playerbot_dungeon_run r ON r.id = rm.run_id AND r.state IN (0,1,4) "
             "WHERE c.level BETWEEN {} AND {} AND r.id IS NULL "
-            "ORDER BY RAND() LIMIT {}",
-            minLevel, maxLevel, limit * 8);
+            "ORDER BY {} LIMIT {}",
+            minLevel, maxLevel, order, rowLimit));
 
         if (!result)
             return out;
@@ -456,13 +466,26 @@ namespace PlayerbotDungeonSim
             b.Race = f[3].Get<uint8>();
             b.Class = f[4].Get<uint8>();
             b.GuildId = f[5].Get<uint32>();
-            uint32 accountId = f[6].Get<uint32>();
+            b.AccountId = f[6].Get<uint32>();
+            b.DbOnline = f[7].Get<uint8>() != 0;
             b.Team = GetTeamFromRace(b.Race);
             b.PreferredRole = GuessRole(b.Class);
 
-            if (b.Team == team && b.Level >= MinBotLevel && AccountMatchesBotFilter(accountId))
+            if (b.Team == team && b.Level >= MinBotLevel && AccountMatchesBotFilter(b.AccountId))
                 out.push_back(b);
         } while (result->NextRow());
+
+        if (Debug && RequireOnlineBotsForRun && LiveDebugRoster)
+        {
+            uint32 dbOnline = 0;
+            for (BotCandidate const& b : out)
+                if (b.DbOnline)
+                    ++dbOnline;
+
+            DebugLog("Candidate scan " + TeamName(team) + " levels " + std::to_string(minLevel) + "-" + std::to_string(maxLevel) +
+                ": eligible=" + std::to_string(out.size()) + " dbOnline=" + std::to_string(dbOnline) +
+                " prefix='" + BotAccountPrefix + "'.");
+        }
 
         return out;
     }
@@ -631,7 +654,12 @@ namespace PlayerbotDungeonSim
     static Player* FindOnlinePlayer(uint32 guidLow)
     {
         ObjectGuid guid = ObjectGuid::Create<HighGuid::Player>(guidLow);
-        return ObjectAccessor::FindConnectedPlayer(guid);
+        if (Player* player = ObjectAccessor::FindConnectedPlayer(guid))
+            return player;
+
+        // Playerbots on some branches may be in-world without a normal connected client session.
+        // FindPlayer is a broader lookup and lets live-test mode see those bot Player objects.
+        return ObjectAccessor::FindPlayer(guid);
     }
 
     static void SendGuildSimulationMessage(uint32 guildId, std::string const& speakerName, std::string const& message)
@@ -899,7 +927,7 @@ namespace PlayerbotDungeonSim
         for (BotCandidate const& b : members)
         {
             Player* player = FindOnlinePlayer(b.GuidLow);
-            if (player && IsPlayerBotAccount(player) && IsPlayerSafeToMove(player))
+            if (IsBotCandidateSafeToMove(player, b))
                 ++count;
         }
         return count;
@@ -908,7 +936,9 @@ namespace PlayerbotDungeonSim
     static uint32 CountOnlineRunMembers(uint64 runId, bool requireMovable)
     {
         QueryResult result = CharacterDatabase.Query(
-            "SELECT guid FROM playerbot_dungeon_run_member WHERE run_id = {} AND joined_as_real_player = 0",
+            "SELECT rm.guid, c.account FROM playerbot_dungeon_run_member rm "
+            "JOIN characters c ON c.guid = rm.guid "
+            "WHERE rm.run_id = {} AND rm.joined_as_real_player = 0",
             runId);
 
         if (!result)
@@ -917,13 +947,21 @@ namespace PlayerbotDungeonSim
         uint32 count = 0;
         do
         {
-            uint32 guidLow = result->Fetch()[0].Get<uint32>();
+            Field* f = result->Fetch();
+            uint32 guidLow = f[0].Get<uint32>();
+            uint32 accountId = f[1].Get<uint32>();
             Player* player = FindOnlinePlayer(guidLow);
-            if (!player || !IsPlayerBotAccount(player))
+            if (!player || !AccountMatchesBotFilter(accountId))
                 continue;
 
-            if (requireMovable && !IsPlayerSafeToMove(player))
-                continue;
+            if (requireMovable)
+            {
+                BotCandidate b;
+                b.GuidLow = guidLow;
+                b.AccountId = accountId;
+                if (!IsBotCandidateSafeToMove(player, b))
+                    continue;
+            }
 
             ++count;
         } while (result->NextRow());
@@ -952,6 +990,28 @@ namespace PlayerbotDungeonSim
         return true;
     }
 
+    static bool IsBotCandidateSafeToMove(Player* player, BotCandidate const& bot)
+    {
+        if (!player)
+            return false;
+
+        if (!player->IsInWorld())
+            return false;
+
+        if (player->IsBeingTeleported())
+            return false;
+
+        // Candidate account id came from characters.account and already passed the configured bot prefix/range filter.
+        // This keeps live bot movement safe even if the bot has no normal client session.
+        if (!AccountMatchesBotFilter(bot.AccountId))
+            return false;
+
+        if (player->GetSession() && player->GetSession()->GetSecurity() > SEC_PLAYER)
+            return false;
+
+        return true;
+    }
+
     static uint32 TeleportOnlineGroupMembers(std::vector<BotCandidate> const& members, DungeonTemplate const& dungeon, TeleportLocation const& loc)
     {
         if (!AllowOnlineCharacterTouch || !TeleportOnlineMembers)
@@ -961,7 +1021,7 @@ namespace PlayerbotDungeonSim
         for (BotCandidate const& b : members)
         {
             Player* player = FindOnlinePlayer(b.GuidLow);
-            if (!IsPlayerSafeToMove(player))
+            if (!IsBotCandidateSafeToMove(player, b))
                 continue;
 
             if (player->IsInCombat())
@@ -991,7 +1051,7 @@ namespace PlayerbotDungeonSim
         for (BotCandidate const& b : members)
         {
             Player* player = FindOnlinePlayer(b.GuidLow);
-            if (IsPlayerSafeToMove(player) && !player->GetGroup())
+            if (IsBotCandidateSafeToMove(player, b) && !player->GetGroup())
                 online.push_back(player);
         }
 
@@ -1272,6 +1332,43 @@ namespace PlayerbotDungeonSim
         }
     }
 
+    static void LogLiveRosterDiagnostics(DungeonTemplate const& dungeon, std::vector<BotCandidate> const& group, uint32 onlineReady)
+    {
+        if (!Debug || !LiveDebugRoster)
+            return;
+
+        uint32 dbOnline = 0;
+        uint32 objectFound = 0;
+        uint32 movable = 0;
+        for (BotCandidate const& b : group)
+        {
+            if (b.DbOnline)
+                ++dbOnline;
+            Player* player = FindOnlinePlayer(b.GuidLow);
+            if (player)
+                ++objectFound;
+            if (IsBotCandidateSafeToMove(player, b))
+                ++movable;
+        }
+
+        DebugLog("Live roster check for " + dungeon.Name + ": group=" + std::to_string(group.size()) +
+            " dbOnline=" + std::to_string(dbOnline) + " objectFound=" + std::to_string(objectFound) +
+            " movable=" + std::to_string(movable) + " required=" + std::to_string(MinOnlineMembersForLiveRun) + ".");
+
+        uint32 shown = 0;
+        for (BotCandidate const& b : group)
+        {
+            if (shown >= LiveDebugMaxRosterLines)
+                break;
+            Player* player = FindOnlinePlayer(b.GuidLow);
+            DebugLog("  member " + b.Name + " guid=" + std::to_string(b.GuidLow) +
+                " lvl=" + std::to_string(uint32(b.Level)) + " dbOnline=" + std::to_string(b.DbOnline ? 1 : 0) +
+                " object=" + std::to_string(player ? 1 : 0) +
+                " movable=" + std::to_string(IsBotCandidateSafeToMove(player, b) ? 1 : 0));
+            ++shown;
+        }
+    }
+
     static void CreateRun(DungeonTemplate const& dungeon, std::vector<BotCandidate> const& group)
     {
         if (group.empty())
@@ -1293,6 +1390,8 @@ namespace PlayerbotDungeonSim
 
         TeleportLocation runLoc = ResolveTeleportLocation(dungeon);
         uint32 onlineReady = AllowOnlineCharacterTouch ? CountOnlineMovableGroupMembers(group) : 0;
+        if (RealRunFirst && MinOnlineMembersForLiveRun > 0)
+            LogLiveRosterDiagnostics(dungeon, group, onlineReady);
 
         if (RealRunFirst && MinOnlineMembersForLiveRun > 0 && onlineReady < MinOnlineMembersForLiveRun)
         {
@@ -1480,7 +1579,7 @@ namespace PlayerbotDungeonSim
     {
         std::vector<BotCandidate> members;
         QueryResult result = CharacterDatabase.Query(
-            "SELECT c.guid, c.name, c.level, c.race, c.class, COALESCE(g.guildid,0), rm.role "
+            "SELECT c.guid, c.name, c.level, c.race, c.class, COALESCE(g.guildid,0), rm.role, c.account, c.online "
             "FROM playerbot_dungeon_run_member rm "
             "JOIN characters c ON c.guid = rm.guid "
             "LEFT JOIN guild_member g ON g.guid = c.guid "
@@ -1502,6 +1601,8 @@ namespace PlayerbotDungeonSim
             b.GuildId = f[5].Get<uint32>();
             b.Team = GetTeamFromRace(b.Race);
             b.PreferredRole = Role(f[6].Get<uint8>());
+            b.AccountId = f[7].Get<uint32>();
+            b.DbOnline = f[8].Get<uint8>() != 0;
             members.push_back(b);
         } while (result->NextRow());
 
@@ -1621,7 +1722,7 @@ namespace PlayerbotDungeonSim
         upgradeScore = 0;
         equipSlot = 255;
 
-        if (!player || !IsPlayerBotAccount(player))
+        if (!player)
             return false;
 
         ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemEntry);
@@ -2046,6 +2147,9 @@ public:
         RequireOnlineBotsForRun = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.RequireOnlineBotsForRun", false);
         CleanupOfflineRunsWhenLiveOnly = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.CleanupOfflineRunsWhenLiveOnly", true);
         StatusShowOnlineMembers = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.StatusShowOnlineMembers", true);
+        PreferOnlineCandidatesForLiveRuns = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.PreferOnlineCandidatesForLiveRuns", true);
+        LiveDebugRoster = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.LiveDebugRoster", true);
+        LiveDebugMaxRosterLines = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.LiveDebugMaxRosterLines", 5);
         ManualTravelForPlayerJoinedRuns = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.ManualTravelForPlayerJoinedRuns", true);
         AllowOnlineCharacterTouch = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.AllowOnlineCharacterTouch", false);
         StartupDelaySeconds = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.StartupDelaySeconds", 180);
@@ -2119,6 +2223,7 @@ public:
         if (TradeChatEveryTicks == 0)
             TradeChatEveryTicks = 1;
         MinOnlineMembersForLiveRun = std::min<uint32>(MinOnlineMembersForLiveRun, 40);
+        LiveDebugMaxRosterLines = std::min<uint32>(std::max<uint32>(LiveDebugMaxRosterLines, 1), 40);
         if (RaidMinServerLevelCap == 0)
             RaidMinServerLevelCap = 60;
         if (RaidLockoutDays == 0)
@@ -2142,7 +2247,7 @@ public:
             LOG_INFO("module", "[PlayerbotDungeonSim] Live mode: online bot character touching is enabled. Prefix/range safety filter is active; only configured bot accounts may be moved or receive direct loot.");
 
         if (Enable && RequireOnlineBotsForRun)
-            LOG_INFO("module", "[PlayerbotDungeonSim] Live-only mode: offline/fake dungeon starts are disabled; at least {} online/movable bot(s) required per run. cleanupOfflineRuns={} statusOnline={}", MinOnlineMembersForLiveRun, CleanupOfflineRunsWhenLiveOnly ? 1 : 0, StatusShowOnlineMembers ? 1 : 0);
+            LOG_INFO("module", "[PlayerbotDungeonSim] Live-only mode: offline/fake dungeon starts are disabled; at least {} online/movable bot(s) required per run. cleanupOfflineRuns={} statusOnline={} preferOnlineCandidates={} liveDebugRoster={}", MinOnlineMembersForLiveRun, CleanupOfflineRunsWhenLiveOnly ? 1 : 0, StatusShowOnlineMembers ? 1 : 0, PreferOnlineCandidatesForLiveRuns ? 1 : 0, LiveDebugRoster ? 1 : 0);
 
         _startupElapsedMs = 0;
         _startupDelayLogged = false;
