@@ -1,3 +1,5 @@
+[worldserver]
+
 # mod-playerbot-dungeon-sim
 PlayerbotDungeonSim.Enable = 1
 PlayerbotDungeonSim.Debug = 1

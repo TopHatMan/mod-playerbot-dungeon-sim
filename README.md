@@ -374,3 +374,61 @@ online/movable=0, need 1
 ```
 
 It found zero loaded/movable bot `Player` objects in the selected group. It only needs one because `MinOnlineMembersForLiveRun = 1`.
+
+## GM live-test commands
+
+These commands are for forcing live bot dungeon testing instead of waiting for the scheduler.
+They require a GM account and are registered as `.dng-sim`; a chat-hook fallback is also present.
+
+```text
+.dng-sim help
+.dng-sim create <INSTANCE>
+.dng-sim inv <INSTANCE> <BOTNAME>
+.dng-sim rmv <INSTANCE> <BOTNAME>
+.dng-sim wipe <INSTANCE>
+```
+
+Behavior:
+
+- `create` finds a full online/movable bot group for the named instance and starts immediately.
+- `inv` stages one named bot for the instance. Once the staged group reaches the instance group size, it starts automatically.
+- `rmv` removes a named bot from the staged group.
+- `wipe` clears staged groups for the instance and marks active runs for that instance abandoned.
+
+Live commands require:
+
+```ini
+PlayerbotDungeonSim.AllowOnlineCharacterTouch = 1
+PlayerbotDungeonSim.TeleportOnlineMembers = 1
+PlayerbotDungeonSim.BotOnlyEligibilityFilter = 1
+```
+
+The commands still respect the configured bot-account prefix/range and will not move non-bot accounts.
+
+
+### 2026-06-25 diagnostics role/dedupe fix
+
+- Candidate SQL now uses `NOT EXISTS` against active runs instead of joining historical `run_member` rows, preventing duplicate character rows from old completed runs.
+- Group builder defensively dedupes by character GUID, including same-guild groups.
+- Live roster diagnostics now print group composition and each shown member's class, role, and spec flavor, for example `roles=1T/1H/3D` and `class=mage role=dps spec='frost mage'`.
+
+## GM command world SQL
+
+GM test commands require world DB command registration on branches that still use the `command` table. This package includes:
+
+`data/sql/db-world/updates/2026_06_25_01_playerbot_dungeon_sim_commands.sql`
+
+Manual fallback:
+
+```sql
+USE azc_world_ashbringer;
+SOURCE C:/Apps/WowServ/modules/mod-playerbot-dungeon-sim/data/sql/manual/world_commands.sql;
+```
+
+Commands registered:
+
+- `.dng-sim help`
+- `.dng-sim create <instance name>`
+- `.dng-sim inv <instance name> <bot name>`
+- `.dng-sim rmv <instance name> <bot name>`
+- `.dng-sim wipe <instance name>`

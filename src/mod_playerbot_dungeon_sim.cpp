@@ -33,6 +33,8 @@
 #include <unordered_set>
 #include <cctype>
 #include <string>
+#include <map>
+#include <sstream>
 
 namespace PlayerbotDungeonSim
 {
@@ -180,6 +182,7 @@ namespace PlayerbotDungeonSim
     static uint32 TradeChatChance;
     static uint32 TradeChatEveryTicks;
     static uint32 _tradeTickCounter = 0;
+    static std::map<std::string, std::vector<BotCandidate>> _gmStagedGroups;
 
     static uint32 _timerMs = 0;
     static uint32 _statusTimerMs = 0;
@@ -447,9 +450,12 @@ namespace PlayerbotDungeonSim
             "SELECT c.guid, c.name, c.level, c.race, c.class, COALESCE(g.guildid,0), c.account, c.online "
             "FROM characters c "
             "LEFT JOIN guild_member g ON g.guid = c.guid "
-            "LEFT JOIN playerbot_dungeon_run_member rm ON rm.guid = c.guid "
-            "LEFT JOIN playerbot_dungeon_run r ON r.id = rm.run_id AND r.state IN (0,1,4) "
-            "WHERE c.level BETWEEN {} AND {} AND r.id IS NULL "
+            "WHERE c.level BETWEEN {} AND {} "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM playerbot_dungeon_run_member rm "
+            "  JOIN playerbot_dungeon_run r ON r.id = rm.run_id "
+            "  WHERE rm.guid = c.guid AND r.state IN (0,1,4)"
+            ") "
             "ORDER BY {} LIMIT {}",
             minLevel, maxLevel, order, rowLimit));
 
@@ -474,6 +480,17 @@ namespace PlayerbotDungeonSim
             if (b.Team == team && b.Level >= MinBotLevel && AccountMatchesBotFilter(b.AccountId))
                 out.push_back(b);
         } while (result->NextRow());
+
+        // Defensive dedupe: older DB states may have many historical run_member rows for the same bot.
+        // Group building must never use the same character twice in one party.
+        std::unordered_set<uint32> seenGuids;
+        out.erase(std::remove_if(out.begin(), out.end(), [&](BotCandidate const& b)
+        {
+            if (seenGuids.find(b.GuidLow) != seenGuids.end())
+                return true;
+            seenGuids.insert(b.GuidLow);
+            return false;
+        }), out.end());
 
         if (Debug && RequireOnlineBotsForRun && LiveDebugRoster)
         {
@@ -600,9 +617,19 @@ namespace PlayerbotDungeonSim
                     continue;
 
                 std::vector<BotCandidate> sameGuild;
+                std::unordered_set<uint32> sameGuildGuids;
                 for (BotCandidate const& b : candidates)
-                    if (b.GuildId == seed.GuildId && !ShouldSimulatedBotDecline(b, dungeon, declineCount))
-                        sameGuild.push_back(b);
+                {
+                    if (b.GuildId != seed.GuildId)
+                        continue;
+                    if (sameGuildGuids.find(b.GuidLow) != sameGuildGuids.end())
+                        continue;
+                    if (ShouldSimulatedBotDecline(b, dungeon, declineCount))
+                        continue;
+
+                    sameGuildGuids.insert(b.GuidLow);
+                    sameGuild.push_back(b);
+                }
 
                 if (sameGuild.size() >= dungeon.GroupSize)
                 {
@@ -620,7 +647,8 @@ namespace PlayerbotDungeonSim
         {
             if (group.size() >= dungeon.GroupSize)
                 break;
-            if (!hasTank && b.PreferredRole == ROLE_TANK && !ShouldSimulatedBotDecline(b, dungeon, declineCount))
+            bool exists = std::any_of(group.begin(), group.end(), [&](BotCandidate const& g) { return g.GuidLow == b.GuidLow; });
+            if (!exists && !hasTank && b.PreferredRole == ROLE_TANK && !ShouldSimulatedBotDecline(b, dungeon, declineCount))
             {
                 group.push_back(b); hasTank = true;
             }
@@ -629,7 +657,8 @@ namespace PlayerbotDungeonSim
         {
             if (group.size() >= dungeon.GroupSize)
                 break;
-            if (!hasHealer && b.PreferredRole == ROLE_HEALER && !ShouldSimulatedBotDecline(b, dungeon, declineCount))
+            bool exists = std::any_of(group.begin(), group.end(), [&](BotCandidate const& g) { return g.GuidLow == b.GuidLow; });
+            if (!exists && !hasHealer && b.PreferredRole == ROLE_HEALER && !ShouldSimulatedBotDecline(b, dungeon, declineCount))
             {
                 group.push_back(b); hasHealer = true;
             }
@@ -762,6 +791,23 @@ namespace PlayerbotDungeonSim
             case ROLE_HEALER: return "heal";
             case ROLE_DPS: return "dps";
             default: return "dps";
+        }
+    }
+
+    static std::string ClassNameText(uint8 cls)
+    {
+        switch (cls)
+        {
+            case CLASS_WARRIOR: return "warrior";
+            case CLASS_PALADIN: return "paladin";
+            case CLASS_HUNTER: return "hunter";
+            case CLASS_ROGUE: return "rogue";
+            case CLASS_PRIEST: return "priest";
+            case CLASS_SHAMAN: return "shaman";
+            case CLASS_MAGE: return "mage";
+            case CLASS_WARLOCK: return "warlock";
+            case CLASS_DRUID: return "druid";
+            default: return "class" + std::to_string(uint32(cls));
         }
     }
 
@@ -1352,7 +1398,21 @@ namespace PlayerbotDungeonSim
                 ++movable;
         }
 
+        uint32 tanks = 0;
+        uint32 healers = 0;
+        uint32 dps = 0;
+        for (BotCandidate const& b : group)
+        {
+            if (b.PreferredRole == ROLE_TANK)
+                ++tanks;
+            else if (b.PreferredRole == ROLE_HEALER)
+                ++healers;
+            else
+                ++dps;
+        }
+
         DebugLog("Live roster check for " + dungeon.Name + ": group=" + std::to_string(group.size()) +
+            " roles=" + std::to_string(tanks) + "T/" + std::to_string(healers) + "H/" + std::to_string(dps) + "D" +
             " dbOnline=" + std::to_string(dbOnline) + " objectFound=" + std::to_string(objectFound) +
             " movable=" + std::to_string(movable) + " required=" + std::to_string(MinOnlineMembersForLiveRun) + ".");
 
@@ -1363,7 +1423,11 @@ namespace PlayerbotDungeonSim
                 break;
             Player* player = FindOnlinePlayer(b.GuidLow);
             DebugLog("  member " + b.Name + " guid=" + std::to_string(b.GuidLow) +
-                " lvl=" + std::to_string(uint32(b.Level)) + " dbOnline=" + std::to_string(b.DbOnline ? 1 : 0) +
+                " lvl=" + std::to_string(uint32(b.Level)) +
+                " class=" + ClassNameText(b.Class) +
+                " role=" + RoleText(b.PreferredRole) +
+                " spec='" + ClassSpecText(b.Class, b.PreferredRole) + "'" +
+                " dbOnline=" + std::to_string(b.DbOnline ? 1 : 0) +
                 " object=" + std::to_string(player ? 1 : 0) +
                 " movable=" + std::to_string(IsBotCandidateSafeToMove(player, b) ? 1 : 0));
             ++shown;
@@ -2091,6 +2155,457 @@ namespace PlayerbotDungeonSim
         } while (active->NextRow());
     }
 
+
+    static std::string TrimCopy(std::string value)
+    {
+        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
+            value.erase(value.begin());
+        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
+            value.pop_back();
+        if (value.size() >= 2 && ((value.front() == '"' && value.back() == '"') || (value.front() == '\'' && value.back() == '\'')))
+            value = value.substr(1, value.size() - 2);
+        return value;
+    }
+
+    static std::string PopFirstToken(std::string& value)
+    {
+        value = TrimCopy(value);
+        if (value.empty())
+            return "";
+
+        size_t pos = value.find_first_of(" \t\r\n");
+        if (pos == std::string::npos)
+        {
+            std::string token = value;
+            value.clear();
+            return token;
+        }
+
+        std::string token = value.substr(0, pos);
+        value = TrimCopy(value.substr(pos + 1));
+        return token;
+    }
+
+    static std::string PopLastToken(std::string& value)
+    {
+        value = TrimCopy(value);
+        if (value.empty())
+            return "";
+
+        size_t pos = value.find_last_of(" \t\r\n");
+        if (pos == std::string::npos)
+        {
+            std::string token = value;
+            value.clear();
+            return token;
+        }
+
+        std::string token = value.substr(pos + 1);
+        value = TrimCopy(value.substr(0, pos));
+        return token;
+    }
+
+    static bool IsUnsignedNumber(std::string const& value)
+    {
+        return !value.empty() && std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isdigit(c); });
+    }
+
+    static bool LoadDungeonTemplateByNameOrId(std::string const& rawName, DungeonTemplate& dungeon)
+    {
+        std::string name = TrimCopy(rawName);
+        if (name.empty())
+            return false;
+
+        QueryResult result;
+        if (IsUnsignedNumber(name))
+        {
+            result = WorldDatabase.Query(
+                "SELECT id, name, map_id, difficulty, min_level, max_level, target_level, group_size, is_raid, "
+                "entrance_map, entrance_x, entrance_y, entrance_z, entrance_o "
+                "FROM playerbot_dungeon_template WHERE id = {} LIMIT 1",
+                uint32(std::stoul(name)));
+        }
+        else
+        {
+            std::string escaped = name;
+            WorldDatabase.EscapeString(escaped);
+            result = WorldDatabase.Query(
+                "SELECT id, name, map_id, difficulty, min_level, max_level, target_level, group_size, is_raid, "
+                "entrance_map, entrance_x, entrance_y, entrance_z, entrance_o "
+                "FROM playerbot_dungeon_template "
+                "WHERE LOWER(name) = LOWER('{}') OR LOWER(name) LIKE LOWER('{}%') "
+                "ORDER BY CASE WHEN LOWER(name) = LOWER('{}') THEN 0 ELSE 1 END, id LIMIT 1",
+                escaped, escaped, escaped);
+        }
+
+        if (!result)
+            return false;
+
+        Field* f = result->Fetch();
+        dungeon.Id = f[0].Get<uint32>();
+        dungeon.Name = f[1].Get<std::string>();
+        dungeon.MapId = f[2].Get<uint32>();
+        dungeon.Difficulty = f[3].Get<uint8>();
+        dungeon.MinLevel = f[4].Get<uint8>();
+        dungeon.MaxLevel = f[5].Get<uint8>();
+        dungeon.TargetLevel = f[6].Get<uint8>();
+        dungeon.GroupSize = f[7].Get<uint8>();
+        dungeon.IsRaid = f[8].Get<uint8>() != 0;
+        dungeon.EntranceMap = f[9].Get<uint32>();
+        dungeon.X = f[10].Get<float>();
+        dungeon.Y = f[11].Get<float>();
+        dungeon.Z = f[12].Get<float>();
+        dungeon.O = f[13].Get<float>();
+        return true;
+    }
+
+    static bool LoadBotCandidateByName(std::string const& rawName, BotCandidate& bot)
+    {
+        std::string name = TrimCopy(rawName);
+        if (name.empty())
+            return false;
+
+        std::string escaped = name;
+        CharacterDatabase.EscapeString(escaped);
+        QueryResult result = CharacterDatabase.Query(
+            "SELECT c.guid, c.name, c.level, c.race, c.class, COALESCE(g.guildid,0), c.account, c.online "
+            "FROM characters c "
+            "LEFT JOIN guild_member g ON g.guid = c.guid "
+            "WHERE LOWER(c.name) = LOWER('{}') LIMIT 1",
+            escaped);
+
+        if (!result)
+            return false;
+
+        Field* f = result->Fetch();
+        bot.GuidLow = f[0].Get<uint32>();
+        bot.Name = f[1].Get<std::string>();
+        bot.Level = f[2].Get<uint8>();
+        bot.Race = f[3].Get<uint8>();
+        bot.Class = f[4].Get<uint8>();
+        bot.GuildId = f[5].Get<uint32>();
+        bot.AccountId = f[6].Get<uint32>();
+        bot.DbOnline = f[7].Get<uint8>() != 0;
+        bot.Team = GetTeamFromRace(bot.Race);
+        bot.PreferredRole = GuessRole(bot.Class);
+
+        return AccountMatchesBotFilter(bot.AccountId);
+    }
+
+    static std::string GmStageKey(uint32 dungeonId, uint8 team)
+    {
+        return std::to_string(dungeonId) + ":" + std::to_string(uint32(team));
+    }
+
+    static bool InsertRunBossRows(uint64 runId, uint32 dungeonId)
+    {
+        QueryResult bosses = WorldDatabase.Query(
+            "SELECT boss_order, boss_name FROM playerbot_dungeon_boss_template WHERE dungeon_template_id = {} ORDER BY boss_order",
+            dungeonId);
+        if (!bosses)
+            return false;
+
+        do
+        {
+            Field* f = bosses->Fetch();
+            std::string bossName = f[1].Get<std::string>();
+            CharacterDatabase.EscapeString(bossName);
+            CharacterDatabase.Execute(
+                "INSERT INTO playerbot_dungeon_run_boss (run_id, boss_order, boss_name, killed) VALUES ({},{},'{}',0)",
+                runId, f[0].Get<uint8>(), bossName);
+        } while (bosses->NextRow());
+
+        return true;
+    }
+
+    static bool StartGmLiveRun(ChatHandler* handler, DungeonTemplate const& dungeon, std::vector<BotCandidate> const& group)
+    {
+        if (!handler)
+            return false;
+
+        if (!Enable)
+        {
+            handler->PSendSysMessage("DungeonSim is disabled.");
+            return false;
+        }
+
+        if (!AllowOnlineCharacterTouch)
+        {
+            handler->PSendSysMessage("DungeonSim live commands need PlayerbotDungeonSim.AllowOnlineCharacterTouch = 1.");
+            return false;
+        }
+
+        if (!TeleportOnlineMembers)
+        {
+            handler->PSendSysMessage("DungeonSim live commands need PlayerbotDungeonSim.TeleportOnlineMembers = 1.");
+            return false;
+        }
+
+        if (group.empty())
+        {
+            handler->PSendSysMessage("No bot members selected for {}.", dungeon.Name);
+            return false;
+        }
+
+        if (!IsDungeonAllowed(dungeon.MapId) || !IsRaidAllowedByServerCap(dungeon))
+        {
+            handler->PSendSysMessage("{} is not available right now. Check disables/progression/level cap.", dungeon.Name);
+            return false;
+        }
+
+        uint32 onlineReady = CountOnlineMovableGroupMembers(group);
+        if (onlineReady < std::max<uint32>(1, MinOnlineMembersForLiveRun))
+        {
+            handler->PSendSysMessage("{} has {} staged bot(s), but only {} online/movable. Need at least {}.",
+                dungeon.Name, uint32(group.size()), onlineReady, std::max<uint32>(1, MinOnlineMembersForLiveRun));
+            LogLiveRosterDiagnostics(dungeon, group, onlineReady);
+            return false;
+        }
+
+        uint32 now = GameTime::GetGameTime().count();
+        uint32 duration = urand(MinDurationMinutes * MINUTE, MaxDurationMinutes * MINUTE);
+        int32 quality = CalculateQuality(group, dungeon);
+        uint32 guildId = GetRunGuildId(group);
+        TeleportLocation loc = ResolveTeleportLocation(dungeon);
+
+        bool madeLiveGroup = CreateLiveGroupIfPossible(group);
+        uint32 movedOnline = TeleportOnlineGroupMembers(group, dungeon, loc);
+        if (movedOnline == 0)
+        {
+            handler->PSendSysMessage("No staged online bots could be teleported for {}.", dungeon.Name);
+            return false;
+        }
+
+        uint64 runId = AllocateRunId();
+        if (!runId)
+        {
+            handler->PSendSysMessage("Could not allocate DungeonSim run id.");
+            return false;
+        }
+
+        CharacterDatabase.Execute(
+            "INSERT INTO playerbot_dungeon_run "
+            "(id, dungeon_template_id, team, guild_id, state, started_at, ends_at, quality_score, planned_duration_sec, "
+            "real_group_created, online_members_moved, entrance_map, entrance_x, entrance_y, entrance_z, entrance_o) "
+            "VALUES ({},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{})",
+            runId, dungeon.Id, group.front().Team, guildId, uint8(RUN_REAL_ATTEMPT), now, now + duration, quality, duration,
+            madeLiveGroup ? 1 : 0, movedOnline, loc.Map, loc.X, loc.Y, loc.Z, loc.O);
+
+        for (BotCandidate const& b : group)
+        {
+            CharacterDatabase.Execute(
+                "INSERT INTO playerbot_dungeon_run_member "
+                "(run_id, guid, role, guild_id, level_at_start, joined_as_real_player) "
+                "VALUES ({},{},{},{},{},0)",
+                runId, b.GuidLow, uint8(b.PreferredRole), b.GuildId, b.Level);
+        }
+
+        InsertRunBossRows(runId, dungeon.Id);
+
+        StatusLog("GM START run #" + std::to_string(runId) + " " + TeamName(group.front().Team) + " " + dungeon.Name +
+            " members=" + std::to_string(group.size()) + " liveGroup=" + std::to_string(madeLiveGroup ? 1 : 0) +
+            " moved=" + std::to_string(movedOnline) + " dest=" + (loc.FromInstanceStart ? "instance" : "entrance"));
+
+        handler->PSendSysMessage("DungeonSim GM run #{} started: {} {} member(s), moved {} online bot(s).",
+            uint32(runId), dungeon.Name, uint32(group.size()), movedOnline);
+        return true;
+    }
+
+    static bool CommandCreate(ChatHandler* handler, std::string const& dungeonName)
+    {
+        DungeonTemplate dungeon;
+        if (!LoadDungeonTemplateByNameOrId(dungeonName, dungeon))
+        {
+            handler->PSendSysMessage("DungeonSim: unknown dungeon `{}`.", dungeonName);
+            return true;
+        }
+
+        std::vector<BotCandidate> bestGroup;
+        uint32 bestOnline = 0;
+        for (uint8 team : { uint8(TEAM_ALLIANCE), uint8(TEAM_HORDE) })
+        {
+            std::vector<BotCandidate> candidates = LoadEligibleBots(team, dungeon.MinLevel, dungeon.MaxLevel, dungeon.GroupSize * 40);
+            candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [](BotCandidate const& b)
+            {
+                return !IsBotCandidateSafeToMove(FindOnlinePlayer(b.GuidLow), b);
+            }), candidates.end());
+
+            std::vector<BotCandidate> group;
+            if (!BuildGroup(candidates, dungeon, group))
+                continue;
+
+            uint32 online = CountOnlineMovableGroupMembers(group);
+            if (online > bestOnline)
+            {
+                bestOnline = online;
+                bestGroup = group;
+            }
+        }
+
+        if (bestGroup.empty())
+        {
+            handler->PSendSysMessage("DungeonSim: no full online/movable bot group found for {} levels {}-{}.",
+                dungeon.Name, uint32(dungeon.MinLevel), uint32(dungeon.MaxLevel));
+            return true;
+        }
+
+        StartGmLiveRun(handler, dungeon, bestGroup);
+        return true;
+    }
+
+    static bool CommandInvite(ChatHandler* handler, std::string const& rest)
+    {
+        std::string args = rest;
+        std::string botName = PopLastToken(args);
+        std::string dungeonName = TrimCopy(args);
+
+        if (dungeonName.empty() || botName.empty())
+        {
+            handler->PSendSysMessage("Usage: .dng-sim inv <INSTANCE> <BOTNAME>");
+            return true;
+        }
+
+        DungeonTemplate dungeon;
+        if (!LoadDungeonTemplateByNameOrId(dungeonName, dungeon))
+        {
+            handler->PSendSysMessage("DungeonSim: unknown dungeon `{}`.", dungeonName);
+            return true;
+        }
+
+        BotCandidate bot;
+        if (!LoadBotCandidateByName(botName, bot))
+        {
+            handler->PSendSysMessage("DungeonSim: bot `{}` not found or does not match configured bot account prefix/range.", botName);
+            return true;
+        }
+
+        if (bot.Level < dungeon.MinLevel || bot.Level > dungeon.MaxLevel)
+            handler->PSendSysMessage("Warning: {} is level {}, outside {} range {}-{}.", bot.Name, uint32(bot.Level), dungeon.Name, uint32(dungeon.MinLevel), uint32(dungeon.MaxLevel));
+
+        if (!IsBotCandidateSafeToMove(FindOnlinePlayer(bot.GuidLow), bot))
+            handler->PSendSysMessage("Warning: {} is not currently online/movable, so the staged run may not start yet.", bot.Name);
+
+        std::string key = GmStageKey(dungeon.Id, bot.Team);
+        std::vector<BotCandidate>& staged = _gmStagedGroups[key];
+        if (std::any_of(staged.begin(), staged.end(), [&](BotCandidate const& b) { return b.GuidLow == bot.GuidLow; }))
+        {
+            handler->PSendSysMessage("{} is already staged for {}.", bot.Name, dungeon.Name);
+            return true;
+        }
+
+        staged.push_back(bot);
+        handler->PSendSysMessage("Staged {} for {} ({}/{}).", bot.Name, dungeon.Name, uint32(staged.size()), uint32(dungeon.GroupSize));
+
+        if (staged.size() >= dungeon.GroupSize)
+        {
+            std::vector<BotCandidate> group(staged.begin(), staged.begin() + dungeon.GroupSize);
+            if (StartGmLiveRun(handler, dungeon, group))
+                staged.erase(staged.begin(), staged.begin() + dungeon.GroupSize);
+        }
+
+        return true;
+    }
+
+    static bool CommandRemove(ChatHandler* handler, std::string const& rest)
+    {
+        std::string args = rest;
+        std::string botName = PopLastToken(args);
+        std::string dungeonName = TrimCopy(args);
+
+        if (dungeonName.empty() || botName.empty())
+        {
+            handler->PSendSysMessage("Usage: .dng-sim rmv <INSTANCE> <BOTNAME>");
+            return true;
+        }
+
+        DungeonTemplate dungeon;
+        if (!LoadDungeonTemplateByNameOrId(dungeonName, dungeon))
+        {
+            handler->PSendSysMessage("DungeonSim: unknown dungeon `{}`.", dungeonName);
+            return true;
+        }
+
+        uint32 removed = 0;
+        for (uint8 team : { uint8(TEAM_ALLIANCE), uint8(TEAM_HORDE) })
+        {
+            std::string key = GmStageKey(dungeon.Id, team);
+            auto it = _gmStagedGroups.find(key);
+            if (it == _gmStagedGroups.end())
+                continue;
+
+            auto& staged = it->second;
+            size_t before = staged.size();
+            staged.erase(std::remove_if(staged.begin(), staged.end(), [&](BotCandidate const& b)
+            {
+                return LowerCopy(b.Name) == LowerCopy(botName);
+            }), staged.end());
+            removed += uint32(before - staged.size());
+        }
+
+        handler->PSendSysMessage("DungeonSim: removed {} staged bot(s) named {} from {}.", removed, botName, dungeon.Name);
+        return true;
+    }
+
+    static bool CommandWipe(ChatHandler* handler, std::string const& dungeonName)
+    {
+        DungeonTemplate dungeon;
+        if (!LoadDungeonTemplateByNameOrId(dungeonName, dungeon))
+        {
+            handler->PSendSysMessage("DungeonSim: unknown dungeon `{}`.", dungeonName);
+            return true;
+        }
+
+        for (uint8 team : { uint8(TEAM_ALLIANCE), uint8(TEAM_HORDE) })
+            _gmStagedGroups.erase(GmStageKey(dungeon.Id, team));
+
+        uint32 now = GameTime::GetGameTime().count();
+        CharacterDatabase.Execute(
+            "UPDATE playerbot_dungeon_run SET state = {}, result = {}, ends_at = {} "
+            "WHERE dungeon_template_id = {} AND state IN (0,1,4)",
+            uint8(RUN_FAILED), uint8(RESULT_ABANDONED), now, dungeon.Id);
+        CharacterDatabase.Execute(
+            "UPDATE playerbot_dungeon_player_invite SET state = 4, note = 'gm_wipe' "
+            "WHERE dungeon_template_id = {} AND state = 0",
+            dungeon.Id);
+
+        handler->PSendSysMessage("DungeonSim: wiped staged groups and active runs for {}.", dungeon.Name);
+        StatusLog("GM WIPE " + dungeon.Name + ": staged groups cleared and active runs marked abandoned.");
+        return true;
+    }
+
+    static bool HandleGmDngSimCommand(ChatHandler* handler, std::string args)
+    {
+        if (!handler)
+            return false;
+
+        args = TrimCopy(args);
+        if (args.rfind(".dng-sim", 0) == 0)
+            args = TrimCopy(args.substr(8));
+
+        std::string sub = LowerCopy(PopFirstToken(args));
+        if (sub.empty() || sub == "help")
+        {
+            handler->PSendSysMessage("DungeonSim GM commands:");
+            handler->PSendSysMessage(".dng-sim create <INSTANCE> - auto-build an online bot group and start live run");
+            handler->PSendSysMessage(".dng-sim inv <INSTANCE> <BOTNAME> - stage named bot; starts when group is full");
+            handler->PSendSysMessage(".dng-sim rmv <INSTANCE> <BOTNAME> - remove named bot from staged group");
+            handler->PSendSysMessage(".dng-sim wipe <INSTANCE> - clear staged group and mark active runs abandoned");
+            return true;
+        }
+
+        if (sub == "create")
+            return CommandCreate(handler, args);
+        if (sub == "inv")
+            return CommandInvite(handler, args);
+        if (sub == "rmv")
+            return CommandRemove(handler, args);
+        if (sub == "wipe")
+            return CommandWipe(handler, args);
+
+        handler->PSendSysMessage("DungeonSim: unknown subcommand `{}`. Use .dng-sim help.", sub);
+        return true;
+    }
+
     static void TryStartRuns()
     {
         for (uint32 made = 0; made < MaxGroupsPerTick; ++made)
@@ -2323,7 +2838,39 @@ public:
         if (PlayerbotDungeonSim::HandleInviteChat(player, msg))
             return false;
 
+        // Fallback parser for GM test commands on branches where command registration
+        // does not catch dashed command names. CommandScript below is still the primary path.
+        if (msg.rfind(".dng-sim", 0) == 0 && player && player->GetSession() && player->GetSession()->GetSecurity() >= SEC_GAMEMASTER)
+        {
+            ChatHandler handler(player->GetSession());
+            PlayerbotDungeonSim::HandleGmDngSimCommand(&handler, msg);
+            return false;
+        }
+
         return true;
+    }
+};
+
+
+class PlayerbotDungeonSimCommandScript : public CommandScript
+{
+public:
+    PlayerbotDungeonSimCommandScript() : CommandScript("PlayerbotDungeonSimCommandScript") { }
+
+    std::vector<Acore::ChatCommands::ChatCommandBuilder> GetCommands() const override
+    {
+        using namespace Acore::ChatCommands;
+
+        static std::vector<ChatCommandBuilder> commandTable =
+        {
+            { "dng-sim", HandleDngSimCommand, SEC_GAMEMASTER, Console::No }
+        };
+        return commandTable;
+    }
+
+    static bool HandleDngSimCommand(ChatHandler* handler, char const* args)
+    {
+        return PlayerbotDungeonSim::HandleGmDngSimCommand(handler, args ? args : "");
     }
 };
 
@@ -2331,6 +2878,7 @@ void AddSC_mod_playerbot_dungeon_sim()
 {
     new PlayerbotDungeonSimWorldScript();
     new PlayerbotDungeonSimPlayerScript();
+    new PlayerbotDungeonSimCommandScript();
 }
 
 // AzerothCore module loader symbol.
