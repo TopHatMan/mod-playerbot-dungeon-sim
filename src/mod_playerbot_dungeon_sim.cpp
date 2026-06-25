@@ -920,6 +920,7 @@ namespace PlayerbotDungeonSim
     }
 
     static bool IsPlayerSafeToMove(Player* player);
+    static bool IsBotCandidateSafeToMove(Player* player, BotCandidate const& bot);
 
     static uint32 CountOnlineMovableGroupMembers(std::vector<BotCandidate> const& members)
     {
