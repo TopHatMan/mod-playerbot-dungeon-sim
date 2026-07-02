@@ -1,5 +1,73 @@
 # mod-playerbot-dungeon-sim
 
+Native-only **no-waypoint test build**.
+
+This build deliberately disables the old in-instance waypoint/event-step systems by default.
+
+The goal of this version is to test the clean behavior:
+
+```text
+Group forms
+↓
+Leader enters dungeon / followers join the same instance copy
+↓
+No internal waypoint jumps
+↓
+No cannon piles / WC forced anchors / weird mid-dungeon teleports
+↓
+SIM/HYBRID still resolves loot + XP
+```
+
+Keep:
+
+- dungeon templates
+- entrance/start teleports
+- SIM / REAL / HYBRID
+- loot
+- XP
+- audit log
+- observe / where / evac
+- same-instance leader/follower entry fix
+- return-on-end unload fix
+
+Disabled by default:
+
+- `playerbot_dungeon_waypoint` usage
+- `.dng-sim wp ...` debug commands
+- `playerbot_dungeon_event_step` usage
+- `.dng-sim step ...` debug commands
+
+Recommended config:
+
+```ini
+PlayerbotDungeonSim.RunMode = SIM
+PlayerbotDungeonSim.HybridSimReal = 1
+PlayerbotDungeonSim.HybridRealChance = 10
+PlayerbotDungeonSim.HybridRealFallbackToSim = 1
+
+PlayerbotDungeonSim.DisableRouteWaypoints = 1
+PlayerbotDungeonSim.InstanceWaypointTeleport = 0
+PlayerbotDungeonSim.NativeEventSteps = 0
+PlayerbotDungeonSim.ProgressiveTeleport = 0
+
+PlayerbotDungeonSim.TeleportOnlineMembers = 1
+PlayerbotDungeonSim.TeleportInsideInstance = 1
+PlayerbotDungeonSim.CreateRealGroups = 1
+PlayerbotDungeonSim.ReturnOnlineMembersOnEnd = 1
+
+PlayerbotDungeonSim.AwardLoot = 1
+PlayerbotDungeonSim.AwardXp = 1
+PlayerbotDungeonSim.XpPercentOfLevel = 25
+```
+
+The old waypoint tables can remain in the DB. This build ignores them while `DisableRouteWaypoints = 1`.
+
+No CMake file is included.
+
+---
+
+# mod-playerbot-dungeon-sim
+
 Hybrid SIM/REAL build.
 
 Recommended design:
@@ -90,3 +158,15 @@ Manual SQL fallback for the new character table:
 USE azc_characters_ashbringer;
 SOURCE C:/Apps/WowServ/modules/mod-playerbot-dungeon-sim/data/sql/manual/characters_xp_awards.sql;
 ```
+
+
+## Native-only REAL mode
+
+This build does not depend on `mod-dungeon-clear`. DungeonSim owns both sides now:
+
+```text
+SIM/HYBRID = stable timed progression, loot, XP, logs
+REAL = live group, instance-entry, leader/follower leash, native route/event steps
+```
+
+Recommended path is still HYBRID: let SIM carry bot gear/XP progression while REAL stays an experimental live attempt layer.
