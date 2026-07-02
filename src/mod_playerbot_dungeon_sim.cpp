@@ -53,6 +53,8 @@
 #include "Playerbots.h"
 #include "PlayerbotAI.h"
 #include "RandomPlayerbotMgr.h"
+#include "Channel.h"
+#include "ChannelMgr.h"
 
  // mod-dungeon-clear entry point. Forward-declared rather than #included so this
  // module needs no include path into mod-dungeon-clear — both compile into the
@@ -115,6 +117,10 @@ namespace PBDSim
     static bool     AnnounceTradeChat = false;  // ...and Trade (city only); off to avoid spam
     static bool     AllowPlayerJoin = true;   // real players may .dsim join a forming run
 
+    // ---- city staging (populate cities with LFG groups) ----
+    static bool     StageInCity = true;   // all-bot 5-mans loiter in a city, advertising, before entering
+    static uint32   StageSeconds = 40;     // how long they hang out in the city first
+
     // ---- data ----
     struct DungeonTemplate
     {
@@ -132,7 +138,8 @@ namespace PBDSim
         RUN_ENTERING = 0,
         RUN_CLEARING = 1,
         RUN_RETURNING = 2,
-        RUN_SIMMING = 3   // offscreen raid progression (no teleport / no dungeon clear)
+        RUN_SIMMING = 3,  // offscreen raid progression (no teleport / no dungeon clear)
+        RUN_STAGING = 4   // all-bot 5-man loitering in a city, advertising LFG, before it heads in
     };
 
     enum RunMode : uint8
@@ -156,6 +163,7 @@ namespace PBDSim
         uint32 stateMs = 0;
         uint32 totalMs = 0;
         bool clearStarted = false;
+        bool midAnnounced = false;   // re-advertised once mid-staging
     };
 
     static std::vector<Run> g_runs;
@@ -819,6 +827,70 @@ namespace PBDSim
     }
 
     // ------------------------------------------------------- social / guild
+    // -------------------------------------------------------- city staging
+    struct CityLoc { uint32 mapId; float x, y, z, o; };
+    static std::vector<CityLoc> g_allianceCities;
+    static std::vector<CityLoc> g_hordeCities;
+    static bool g_citiesLoaded = false;
+
+    // Pull known-good capital coordinates from the server's own game_tele table
+    // rather than hardcoding risky Z values. Vanilla-only capitals — no Exodar or
+    // Silvermoon on a progression realm.
+    static void LoadCityInto(std::vector<char const*> const& aliases, std::vector<CityLoc>& out)
+    {
+        for (char const* name : aliases)
+        {
+            QueryResult r = WorldDatabase.Query(
+                "SELECT map, position_x, position_y, position_z, orientation FROM game_tele WHERE name = '{}' LIMIT 1",
+                name);
+            if (!r)
+                continue;
+            Field* f = r->Fetch();
+            CityLoc c;
+            c.mapId = f[0].Get<uint16>();
+            c.x = f[1].Get<float>();
+            c.y = f[2].Get<float>();
+            c.z = f[3].Get<float>();
+            c.o = f[4].Get<float>();
+            out.push_back(c);
+            return;
+        }
+        LOG_WARN("module", "[DungeonSim] No game_tele entry for city '{}' — staging will skip it.", aliases.front());
+    }
+
+    static void LoadCities()
+    {
+        g_allianceCities.clear();
+        g_hordeCities.clear();
+        LoadCityInto({ "stormwind" }, g_allianceCities);
+        LoadCityInto({ "ironforge" }, g_allianceCities);
+        LoadCityInto({ "darnassus" }, g_allianceCities);
+        LoadCityInto({ "orgrimmar" }, g_hordeCities);
+        LoadCityInto({ "thunderbluff", "thunder bluff" }, g_hordeCities);
+        LoadCityInto({ "undercity" }, g_hordeCities);
+        g_citiesLoaded = true;
+        LOG_INFO("module", "[DungeonSim] Loaded {} Alliance / {} Horde city stage points.",
+            uint32(g_allianceCities.size()), uint32(g_hordeCities.size()));
+    }
+
+    static bool StageGroupInCity(Run const& run, uint8 team)
+    {
+        std::vector<CityLoc> const& cities = (team == uint8(TEAM_ALLIANCE)) ? g_allianceCities : g_hordeCities;
+        if (cities.empty())
+            return false;
+        CityLoc const& c = cities[urand(0, uint32(cities.size() - 1))];
+        for (ObjectGuid const& g : run.members)
+        {
+            Player* m = ObjectAccessor::FindPlayer(g);
+            if (!m || !m->IsInWorld() || m->IsBeingTeleported())
+                continue;
+            float const ox = c.x + frand(-6.0f, 6.0f);
+            float const oy = c.y + frand(-6.0f, 6.0f);
+            m->TeleportTo(c.mapId, ox, oy, c.z, c.o);
+        }
+        return true;
+    }
+
     static uint32 ComputeGroupGuild(std::vector<ObjectGuid> const& members, ObjectGuid leaderGuid)
     {
         Player* leader = ObjectAccessor::FindPlayer(leaderGuid);
@@ -838,12 +910,31 @@ namespace PBDSim
         return (total > 0 && shared * 2 >= total) ? gid : 0;   // majority share = guild run
     }
 
+    // Post to a channel the bot already belongs to, by id, WITHOUT playerbots'
+    // SayToChannel zone filter (which never matches Trade — the channel is
+    // "Trade - City" but the bot's zone is "Orgrimmar"/etc., so every Trade post
+    // is silently dropped). Bots join "Trade - City" and the LFG channel at login.
+    static bool SayInChannel(Player* bot, uint32 chanId, std::string const& msg)
+    {
+        if (!bot || msg.empty())
+            return false;
+        ChannelMgr* cMgr = ChannelMgr::forTeam(bot->GetTeamId());
+        if (!cMgr)
+            return false;
+        for (auto const& kv : cMgr->GetChannels())
+        {
+            Channel* channel = kv.second;
+            if (!channel || channel->GetChannelId() != chanId || channel->GetName().empty())
+                continue;
+            channel->Say(bot->GetGUID(), msg.c_str(), LANG_UNIVERSAL);
+            return true;
+        }
+        return false;
+    }
+
     static void AnnounceLfg(Player* leader, std::string const& content, bool guildRun, uint32 have, uint32 need)
     {
         if (!AnnounceLfgChat || !leader)
-            return;
-        PlayerbotAI* ai = GET_PLAYERBOT_AI(leader);
-        if (!ai)
             return;
         std::string msg;
         if (guildRun)
@@ -853,15 +944,14 @@ namespace PBDSim
         else
             msg = "LFM " + content + " - one more welcome";
 
-        // Global LFG channel, plus the bot's CURRENT zone General (city General
-        // while forming up in town, or the dungeon's zone General if they're out
-        // there) so the chatter shows up where players actually watch. Trade too
-        // when in a city (SayToChannel no-ops if the channel isn't present).
-        ai->SayToChannel(msg, ChatChannelId::LOOKING_FOR_GROUP);
+        // Global LFG channel always; plus the faction-wide "Trade - City" channel
+        // and the bot's zone General when enabled. Uses the membership the bot got
+        // at login and bypasses the broken zone filter, so these actually post.
+        SayInChannel(leader, ChatChannelId::LOOKING_FOR_GROUP, msg);
         if (AnnounceGeneralChat)
-            ai->SayToChannel(msg, ChatChannelId::GENERAL);
+            SayInChannel(leader, ChatChannelId::GENERAL, msg);
         if (AnnounceTradeChat)
-            ai->SayToChannel(msg, ChatChannelId::TRADE);
+            SayInChannel(leader, ChatChannelId::TRADE, msg);
     }
 
     // Shared roster: tank + one healer + fill to `need`, same team within band.
@@ -934,13 +1024,23 @@ namespace PBDSim
 
         run.guildId = ComputeGroupGuild(run.members, run.leaderGuid);
         ResolveInstanceStart(dungeon, run.sx, run.sy, run.sz, run.so);
-        run.state = RUN_ENTERING;
+
+        // All-bot group: loiter in a random faction capital first (advertising
+        // LFG), so cities look populated. Player-led groups skip staging and go
+        // straight in. Falls back to ENTERING if no city stage points loaded.
+        bool const botOnly = !RunHasRealPlayer(run);
+        if (StageInCity && botOnly && StageGroupInCity(run, leader->GetTeamId()))
+            run.state = RUN_STAGING;
+        else
+            run.state = RUN_ENTERING;
+
         g_runs.push_back(run);
 
         ReserveRunBots(run);
         AnnounceLfg(leader, run.name, run.guildId != 0, uint32(run.members.size()), 5);
-        LOG_INFO("module", "[DungeonSim] Real run #{} {} (map {}) - {} bots{}.",
-            run.id, run.name, run.mapId, uint32(run.members.size()), run.guildId ? " [guild]" : "");
+        LOG_INFO("module", "[DungeonSim] Real run #{} {} (map {}) - {} bots{}{}.",
+            run.id, run.name, run.mapId, uint32(run.members.size()),
+            run.guildId ? " [guild]" : "", run.state == RUN_STAGING ? " [staging in city]" : "");
         return true;
     }
 
@@ -978,6 +1078,9 @@ namespace PBDSim
 
     static bool TryFormRun()
     {
+        if (StageInCity && !g_citiesLoaded)
+            LoadCities();   // DB is available by the time runs start forming
+
         std::vector<Cand> cands;
         GatherCandidates(cands);
         if (cands.empty())
@@ -1048,6 +1151,22 @@ namespace PBDSim
 
         switch (run.state)
         {
+        case RUN_STAGING:
+        {
+            // Loiter in the city, advertising, then head to the dungeon. One
+            // extra LFG shout partway through so passers-by see them looking.
+            if (!run.midAnnounced && run.stateMs > (StageSeconds / 2) * IN_MILLISECONDS)
+            {
+                AnnounceLfg(leader, run.name, run.guildId != 0, uint32(run.members.size()), 5);
+                run.midAnnounced = true;
+            }
+            if (run.stateMs > StageSeconds * IN_MILLISECONDS)
+            {
+                run.state = RUN_ENTERING;
+                run.stateMs = 0;
+            }
+            break;
+        }
         case RUN_ENTERING:
         {
             // Only all-bot groups get force-teleported in. If a real player
@@ -1193,6 +1312,8 @@ namespace PBDSim
         AnnounceGeneralChat = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.AnnounceGeneralChat", true);
         AnnounceTradeChat = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.AnnounceTradeChat", false);
         AllowPlayerJoin = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.AllowPlayerJoin", true);
+        StageInCity = sConfigMgr->GetOption<bool>("PlayerbotDungeonSim.StageInCity", true);
+        StageSeconds = sConfigMgr->GetOption<uint32>("PlayerbotDungeonSim.StageSeconds", 40);
 
         if (ClearsToAdvanceTier < 1)
             ClearsToAdvanceTier = 1;
@@ -1283,7 +1404,8 @@ public:
         }
         for (Run const& r : g_runs)
         {
-            char const* st = r.state == RUN_ENTERING ? "entering"
+            char const* st = r.state == RUN_STAGING ? "staging"
+                : r.state == RUN_ENTERING ? "entering"
                 : r.state == RUN_CLEARING ? "clearing"
                 : r.state == RUN_SIMMING ? "sim-raid" : "returning";
             handler->PSendSysMessage("#{} {} — {} — {} bots — {}s in state.",

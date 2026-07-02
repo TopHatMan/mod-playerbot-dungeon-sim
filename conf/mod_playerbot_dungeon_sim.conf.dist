@@ -231,3 +231,23 @@ PlayerbotDungeonSim.AnnounceGeneralChat = 1
 #        Default: 0
 #
 PlayerbotDungeonSim.AnnounceTradeChat = 0
+
+#
+#   ---- city staging (populate the capitals) ----
+#
+
+#
+#    PlayerbotDungeonSim.StageInCity
+#        All-bot 5-man groups teleport to a random faction capital and loiter
+#        there advertising LFG before heading into the dungeon, so the cities look
+#        populated. Player-led groups skip this and go straight in. Coordinates
+#        come from the server's game_tele table (stormwind/ironforge/darnassus,
+#        orgrimmar/thunderbluff/undercity). Default: 1
+#
+PlayerbotDungeonSim.StageInCity = 1
+
+#
+#    PlayerbotDungeonSim.StageSeconds
+#        How long a group loiters in the city before entering.  Default: 40
+#
+PlayerbotDungeonSim.StageSeconds = 40
