@@ -221,7 +221,7 @@ namespace PBDSim
             if (!m)
                 continue;
             PlayerbotAI* ai = GET_PLAYERBOT_AI(m);
-            if (!ai || ai->IsRealPlayer())
+            if (!ai || IsSelfBot(m))
                 return true;
         }
         return false;
@@ -236,7 +236,7 @@ namespace PBDSim
             if (!p)
                 continue;
             PlayerbotAI* ai = GET_PLAYERBOT_AI(p);
-            if (!ai || ai->IsRealPlayer())
+            if (!ai || IsSelfBot(p))
                 continue;
             if (OnlyRandomBots && !sRandomPlayerbotMgr.IsRandomBot(p))
                 continue;
