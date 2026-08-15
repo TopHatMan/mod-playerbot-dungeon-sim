@@ -192,7 +192,7 @@ PlayerbotDungeonSim.AnnounceLfgChat = 1
 
 #
 #    PlayerbotDungeonSim.AllowPlayerJoin
-#        Let a real player run ".dsim join [runId]" to ride along on a forming
+#        Let a real player run ".dngsim join [runId]" to ride along on a forming
 #        5-man (they get teleported in with the party).
 #        Default: 1
 #

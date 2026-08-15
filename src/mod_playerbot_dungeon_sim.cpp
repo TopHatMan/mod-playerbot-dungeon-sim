@@ -115,7 +115,7 @@ namespace PBDSim
     static bool     AnnounceLfgChat = true;   // bots post in the LFG channel when forming
     static bool     AnnounceGeneralChat = true;  // ...and in their current zone General channel
     static bool     AnnounceTradeChat = false;  // ...and Trade (city only); off to avoid spam
-    static bool     AllowPlayerJoin = true;   // real players may .dsim join a forming run
+    static bool     AllowPlayerJoin = true;   // real players may .dngsim join a forming run
 
     // ---- city staging (populate cities with LFG groups) ----
     static bool     StageInCity = true;   // all-bot 5-mans loiter in a city, advertising, before entering
@@ -334,18 +334,30 @@ namespace PBDSim
         return m->GetMapId() == leader->GetMapId() && m->GetInstanceId() == leader->GetInstanceId();
     }
 
-    // Read the dungeon-clear "enabled" flag straight off the leader's AI context
-    // (same cross-bot read dungeon clear uses internally). False once the run is
-    // not active — i.e. before it starts, and again after a full clear or wipe.
-    static bool LeaderClearActive(Player* leader)
+    // True while the dungeon-clear run is still active. StartAutonomousClear
+    // enables the clear on the tank FindLeaderTank elects, which may not be
+    // run.leaderGuid, so we check EVERY member rather than one assumed leader.
+    // The value lookup is null-checked: a bot whose context has no DC values
+    // registered returns null from GetValue, and dereferencing that null was the
+    // crash (mod_playerbot_dungeon_sim.cpp line 348).
+    static bool ClearStillActive(Run const& run)
     {
-        PlayerbotAI* ai = GET_PLAYERBOT_AI(leader);
-        if (!ai)
-            return false;
-        AiObjectContext* ctx = ai->GetAiObjectContext();
-        if (!ctx)
-            return false;
-        return ctx->GetValue<bool>("dungeon clear enabled")->Get();
+        for (ObjectGuid const& g : run.members)
+        {
+            Player* m = ObjectAccessor::FindPlayer(g);
+            if (!m || !m->IsInWorld())
+                continue;
+            PlayerbotAI* ai = GET_PLAYERBOT_AI(m);
+            if (!ai)
+                continue;
+            AiObjectContext* ctx = ai->GetAiObjectContext();
+            if (!ctx)
+                continue;
+            if (auto* v = ctx->GetValue<bool>("dungeon clear enabled"))
+                if (v->Get())
+                    return true;
+        }
+        return false;
     }
 
     // ----------------------------------------------------- disabled content
@@ -926,6 +938,10 @@ namespace PBDSim
             Channel* channel = kv.second;
             if (!channel || channel->GetChannelId() != chanId || channel->GetName().empty())
                 continue;
+            // Channel::Say drops the message if the sender isn't a member. IsOn()
+            // is private, but JoinChannel() is a safe no-op when already joined, so
+            // just call it to guarantee membership before speaking.
+            channel->JoinChannel(bot, "");
             channel->Say(bot->GetGUID(), msg.c_str(), LANG_UNIVERSAL);
             return true;
         }
@@ -1206,7 +1222,17 @@ namespace PBDSim
             bool const everyoneIn = present > 0 && insideAlive >= present;
             bool const timedOut = run.stateMs > EnterTimeoutSeconds * IN_MILLISECONDS;
 
-            if (everyoneIn || (timedOut && insideAlive >= MinGroupSize))
+            // The leader must be FULLY settled on the instance before we hand
+            // off to the dungeon-clear driver. OnInstanceMap can already be
+            // true during the final phase of a teleport (map assigned, player
+            // not yet in-world), and StartAutonomousClear -> EnableClearOnLeader
+            // computes NextDungeonBoss against that half-loaded instance, which
+            // returns a garbage optional and crashes on the announce. Waiting a
+            // tick for IsInWorld() && !IsBeingTeleported() closes the race.
+            bool const leaderReady =
+                leader && leader->IsInWorld() && !leader->IsBeingTeleported();
+
+            if (leaderReady && (everyoneIn || (timedOut && insideAlive >= MinGroupSize)))
             {
                 if (DungeonClearControl::StartAutonomousClear(leader))
                 {
@@ -1235,7 +1261,7 @@ namespace PBDSim
         }
         case RUN_CLEARING:
         {
-            bool const active = LeaderClearActive(leader);
+            bool const active = ClearStillActive(run);
             bool const timedOut = run.stateMs > MaxRunMinutes * MINUTE * IN_MILLISECONDS;
             if (!active || timedOut)
             {
@@ -1390,7 +1416,7 @@ public:
             { "stop",   HandleStop,   SEC_GAMEMASTER, Console::Yes },
             { "join",   HandleJoin,   SEC_PLAYER,     Console::No },
         };
-        static ChatCommandTable root = { { "dsim", sub } };
+        static ChatCommandTable root = { { "dngsim", sub } };
         return root;
     }
 
@@ -1435,7 +1461,7 @@ public:
         }
         if (runId == 0)
         {
-            handler->SendSysMessage("Usage: .dsim stop <runId>  (see .dsim status)");
+            handler->SendSysMessage("Usage: .dngsim stop <runId>  (see .dngsim status)");
             return true;
         }
         for (Run& r : g_runs)
@@ -1495,7 +1521,7 @@ public:
                 return true;
             }
         }
-        handler->SendSysMessage("DungeonSim: no joinable run right now (see .dsim status).");
+        handler->SendSysMessage("DungeonSim: no joinable run right now (see .dngsim status).");
         return true;
     }
 };

@@ -53,7 +53,7 @@ That is the signal you're on the wrong dungeon-clear. Install the fork and set
   progression, never a levelling drop.
 - **Alive-world LFG chat.** Forming groups post "LFG/LFM \<dungeon\>" in the LFG
   channel (and optionally Trade/General), flavored for guild runs vs pugs.
-- **Players can join.** `.dsim join [runId]` drops a real player into a forming
+- **Players can join.** `.dngsim join [runId]` drops a real player into a forming
   5-man; all-bot groups are teleported in, player-led groups enter naturally.
 - **Disabled-content aware.** Every candidate map is checked against the `disables`
   table, so disabled instances (e.g. Maraudon, Dire Maul) are never used.
@@ -86,10 +86,10 @@ git clone https://github.com/<your-user>/mod-dungeon-clear    # the fork
 
 | Command | Access | Description |
 |---|---|---|
-| `.dsim status` | GM | List active runs and their state |
-| `.dsim start` | GM | Force a run to form now |
-| `.dsim stop <runId>` | GM | Recall a run |
-| `.dsim join [runId]` | Player | Join a forming 5-man |
+| `.dngsim status` | GM | List active runs and their state |
+| `.dngsim start` | GM | Force a run to form now |
+| `.dngsim stop <runId>` | GM | Recall a run |
+| `.dngsim join [runId]` | Player | Join a forming 5-man |
 
 ## Configuration
 
